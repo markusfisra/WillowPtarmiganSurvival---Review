@@ -1,0 +1,2000 @@
+---
+title: "Willow ptarmigan survival"
+author: "Markus Fjellstad Israelsen"
+date: "18.11.2019"
+output: word_document
+editor_options: 
+  chunk_output_type: console
+---
+Loading library
+```{r}
+##---------------------------------------------------------##
+## LOAD ALL PACKAGES                                       ##
+##---------------------------------------------------------##
+library(cowplot)
+library(elevatr)
+library(geosphere)
+library(gganimate)
+library(ggplot2)
+library(ggthemes)
+library(gss)
+library(jsonlite)
+library(leaflet)
+library(lubridate)
+library(maps)
+library(maptools)
+library(mapview)
+library(osmdata)
+#library(raster)
+library(RColorBrewer)
+library(readr)
+library(rgdal)
+library(rphylopic)
+library(RSQLite)
+library(sp)
+library(survival)
+library(survminer)
+library(tidyverse)
+library(waffle)
+
+```
+*
+*
+Set working directory, create data frame and extract the columns needed for analysis
+```{r}
+##---------------------------------------------------------##
+## PREPARING DATA                                          ##
+##---------------------------------------------------------##
+
+# Arranging data set
+#---------------------------------------------------------#
+d1 = read_delim("data/rawdataAnalysis.csv", 
+    ";", escape_double = FALSE, trim_ws = TRUE) # Load raw dataset
+d = d1 %>% drop_na(UTM_X, UTM_Y) # excluding occations with missing coordinates
+d = d[!(d$RingNR == 4105430) & !(d$RingNR == 4175796) & !(d$RingNR == 4175795) & !(d$RingNR == 4105436) & !(d$RingNR == 4175793) & !(d$RingNR == 4105444) & !(d$RingNR == 4175791) & !(d$RingNR == 4175792) & !(d$RingNR == 4105427) & !(d$RingNR == 4175764) & !(d$RingNR == 4175797),] # Removing birds that were marked in the pilot in Fiskløysdalen
+
+# Dataframe used for mapping the study area later
+#---------------------------------------------------------#
+map = d
+
+# Extracting the columns needed for analysis
+#---------------------------------------------------------#
+d = d %>% select(RingNR, Date, Year, Status, CaptureAge, sex, CollarFrequency, Sex_dna, Sex_fieldbased, Area)
+
+# Alter the date to follow the standard in the survival function 
+#---------------------------------------------------------#
+d$Date = as.Date(d$Date, format = "%d.%m.%Y") 
+
+# Check the number of radio tagged birds by year using the "d" dataset
+#---------------------------------------------------------#
+dyear = d %>% filter(!duplicated(RingNR))
+d15 = dyear %>% filter(Year == 2015)
+length(d15$RingNR) # 32 birds in 2015
+d16 = dyear %>% filter(Year == 2016)
+length(d16$RingNR) # 38 birds in 2016
+d17 = dyear %>% filter(Year == 2017)
+length(d17$RingNR) # 40 birds in 2017
+d18 = dyear %>% filter(Year == 2018)
+length(d18$RingNR) # 38 birds in 2018
+d19 = dyear %>% filter(Year == 2019)
+length(d19$RingNR) # 40 birds in 2019
+
+```
+*
+*
+Cause survival function
+```{r}
+library(survival)
+"cause.survival" = function(table, p)
+{
+	assign("p", p)
+	
+	# create tables to hold the results of GKM survival estimates for all events and for cause specific event
+	temp.all <- summary(survfit(Surv(ent, exit, event) ~ 1, data = table))										## NB: NOTE THAT "CAUSE" IS CHANGED TO "cause3; CHANGE TO cause TO MAKE ORIGINAL FORMULATIONS!!!!!
+	temp.s <- summary(survfit(Surv(ent, exit, cause == p) ~ 1, data = table))
+	
+	#combine the two tables so survival of all events can be combined with those of the cause specific events
+	s.df <- data.frame(time = temp.s$time, n.event = temp.s$n.event, n.risk = temp.s$n.risk, survival = temp.s$surv)
+	all.df <- data.frame(time = temp.all$time, n.event = temp.all$n.event, n.risk = temp.all$n.risk, survival = temp.all$surv)
+	all.s.df <- merge(all.df, s.df, by.x = "time", by.y = "time", all.x = F, suffixes = c(".all", ".s"))					## Creates NA where s.df holds no data
+	assign("n", all.s.df)
+	x <- length(n[,1])
+	
+	#create temporary placeholders for the calculation of the mortality rate and the cause-specific cumulative incidence func.
+	tmp.string <- numeric(x)					
+	tmp.string2 <- numeric(x)					
+	t <- 1
+	#cycle through the records of the table, including all events to calculate mortality rate and CIF
+	while(t <= x) {
+		tmp.string[1] <- n$n.event.s[1]/n$n.risk.s[1]
+		if (t == 1) tmp.string[t] <- NA else tmp.string[t] <- (n$survival.all[t-1] * n$n.event.s[t])/n$n.risk.s[t]			## The key to the estimation
+		if(is.na(tmp.string[t])) tmp.string2[t] <- NA else tmp.string2[t] <- sum(tmp.string[1:t], na.rm = T)
+		t = t + 1
+	}
+	
+	MORT <- data.frame(mort.rate = tmp.string)
+	CIF2 <- data.frame(CIF = tmp.string2)
+	CIF.s.all <- cbind(all.s.df, MORT, CIF2)
+# Calculate the variance, standard error and the Confidence Intervals around CIF
+SE <- numeric(x)					
+totvar.t <- numeric(x)				
+#Reset all temporary variables
+t <- 1
+j <- 1
+Ij <- 0
+cumvar.p1 <- 0
+cumvar.p2 <- 0
+cumvar.p3 <- 0
+#loop for the total number of records
+while (t <= x) 
+{
+   It <- CIF.s.all$CIF[t]
+   if(is.na(It)) {		
+		CIF.s.all$cumvar[t] <- "NA"
+		CIF.s.all$StdErr[t] <- "NA"
+		CIF.s.all$CI.u[t] <- "NA" 
+		CIF.s.all$CI.l[t] <- "NA"
+		t = t + 1
+	}
+   else 
+	{
+		while (j < t) 
+		{
+		if(is.na(CIF.s.all$CIF[j]))
+			Ij <- Ij			
+	     else	
+			Ij <- CIF.s.all$CIF[j]		
+       cumvar.p1 <- cumvar.p1 + (It - Ij)^2 * (CIF.s.all$n.event.all[j]/(CIF.s.all$n.risk.all[j] * (CIF.s.all$n.risk.all[j] - CIF.s.all$n.event.all[j])))
+		if(!is.na(CIF.s.all$CIF[j]))
+		{
+			if(j == 1)
+				Sj3 <- 1
+			else
+			Sj3 <- CIF.s.all$survival.all[j-1]		
+			Ijc <- CIF.s.all$CIF[j]
+			cumvar.p3 <- cumvar.p3 + (It - Ijc)*(Sj3)*(CIF.s.all$n.event.all[j] / (CIF.s.all$n.risk.all[j])^2)
+		}
+		j <- j + 1
+   		}
+		if (t == 1) 
+			Sj2 <- 1  
+		else
+			Sj2 <- CIF.s.all$survival.all[t-1]  
+					
+  		cumvar.p2 <- (Sj2)^2 * (((CIF.s.all$n.event.all[t])*(CIF.s.all$n.risk.all[t] - CIF.s.all$n.event.all[t]))/(CIF.s.all$n.risk.all[t])^3) + cumvar.p2
+		#total all three components of the variance equation to get the final variance,  generate std. err and confidence intervals
+		#Assign all results to the output table
+		totvar.t[t] <- cumvar.p1 + cumvar.p2 - (2 * cumvar.p3)
+		CIF.s.all$cumvar[t] <- totvar.t[t] 
+		SE[t] <- sqrt(totvar.t[t])
+		CIF.s.all$StdErr[t] <- SE[t]
+		CIF.s.all$CI.u[t] <- CIF.s.all$CIF[t] + (1.645 * SE[t]) 
+		CIF.s.all$CI.l[t] <- CIF.s.all$CIF[t] - (1.645 * SE[t]) 
+		t = t + 1
+		j <- 1
+   }
+cumvar.p1 <- 0
+cumvar.p3 <- 0
+Ij <- 0
+It <- 0
+}
+#Variance calculations end here ----------
+	
+	return(CIF.s.all)
+}
+```
+*
+*
+Converting the data frame to the standard format for survival analyses
+```{r}
+##---------------------------------------------------------##
+## CONVERT DATA TO PROPER FORMAT:                          ##
+## -------------------------------                         ##
+## Create variables entry_time (day the bird entered the   ##
+## study, birds that have status == 1), exit_time2 to 6    ##
+## (birds that have status == 2,3,4,5,6) and exit_date     ##
+## (the date midway between last time the bird was heard   ##
+## alive and when it was registered as dead) = Use         ##
+##  da$Date[1] + floor((da$Date[2]-da$Date[1])/2)          ##
+##---------------------------------------------------------##
+
+# Continue with a copy of the rawdata
+#---------------------------------------------------------#
+da = d
+da = da %>% group_by(RingNR) %>% 
+  mutate(entry_time = ifelse(Status == 1, Date, 0), 
+         exit_time3 = ifelse(Status == 3 & lag(Status == 6, n = 1), Date, 0), 
+         exit_date3 = ifelse(Status == 3 & lag(Status == 6, n = 1), Date, 0), 
+         exit_time2 = ifelse(Status == 2 & lead(Status == 1, n = 1), Date, 0), 
+         exit_date2 = ifelse(Status == 2 & lead(Status == 1, n = 1), Date, 0), 
+         exit_time4 = ifelse(Status == 4 & lag(Status == 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), 0), 
+         exit_date4 = ifelse(Status == 4 & lag(Status == 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), 0), 
+         exit_time5 = ifelse(Status == 5 & lag(Status == 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), 0), 
+         exit_date5 = ifelse(Status == 5 & lag(Status == 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), 0), 
+         exit_time6 = ifelse(Status == 6 & lag(Status == 6, n = 1), lag(Date, n = 1) + floor((lag(Date, n = 2) - lag(Date, n = 1))/2), 0), 
+         exit_date6 = ifelse(Status == 6 & lag(Status == 6, n = 1), lag(Date, n = 1) + floor((lag(Date, n = 2) - lag(Date, n = 1))/2), 0)) %>% mutate(exit_time3 = ifelse(Status == 3 & lag(Status != 6, n = 1), Date, exit_time3), 
+         exit_date3 = ifelse(Status == 3 & lag(Status != 6, n = 1), Date, exit_date3), 
+         exit_time4 = ifelse(Status == 4 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_time4), 
+         exit_date4 = ifelse(Status == 4 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_date4), 
+         exit_time5 = ifelse(Status == 5 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_time5), 
+         exit_date5 = ifelse(Status == 5 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_date5), 
+         exit_time6 = ifelse(Status == 6 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_time6), 
+         exit_date6 = ifelse(Status == 6 & lag(Status != 6, n = 1), Date + floor((lag(Date, n = 1) - Date)/2), exit_date6)) %>% 
+  mutate(exit_time2 = ifelse(is.na(exit_time2), Date, 0), exit_date2 = ifelse(is.na(exit_date2), Date, 0)) # exit_time2 always ends up NA, why? It is because the lead() function produces NA whenever the condition is not true, changing back to "Date" at the end. 
+
+# Adding all the exit_times to one variable. Replacing the exit times where exit_times == lead(exit_times) because if the bird has e.g. Status = 6 and then Status = 3/4/5, then there will be 2 exit times.
+#---------------------------------------------------------#
+da = da %>% mutate(exit_times = exit_time3 + exit_time2 + exit_time4 + exit_time5 + exit_time6, exit_dates = exit_date3 + exit_date2 + exit_date4 + exit_date5 + exit_date6) %>% mutate(exit_times = replace(exit_times, exit_times == lead(exit_times, n = 1), 0), exit_dates = replace(exit_dates, exit_dates == lead(exit_dates, n = 1), 0)) %>% mutate(exit_statuses = ifelse(exit_times > 0, Status, 10)) 
+
+# Converting the entry and exit_dates from numeric back to dates
+#---------------------------------------------------------#
+da$exit_dates = as.Date(da$exit_dates, origin = "1970-01-01")
+da$exit_times = as.Date(da$exit_times, origin = "1970-01-01")
+da$entry_time = as.Date(da$entry_time, origin = "1970-01-01")
+
+# Again select the columns needed to keep the data frame small
+#---------------------------------------------------------#
+da = da %>% select(RingNR, Date, Year, CaptureAge, sex, CollarFrequency, entry_time, exit_times, exit_dates, exit_statuses, Area)
+
+# Creating a variable that holds the date for the start of each timeperiod
+#---------------------------------------------------------#
+tpi = 0
+year1 = 2014
+for (i in 1:10){
+  tpi = paste("tp", i, sep = "") 
+  assign(tpi, ymd(paste(year1+i, "-08-01", sep = "")))
+} 
+
+# Mutate the timeperiod variable by the conditioning on the timeperiod-start variable created above. Set the last row of each ringnr to the timeperiod, otherwise its equal to 0.
+#---------------------------------------------------------#
+da = da %>% mutate(timeperiod = ifelse(exit_dates > ymd("1970-01-01") & exit_dates < tp1, 1, 0)) %>% mutate(timeperiod = ifelse((exit_dates >= tp1 & exit_dates < tp2), 2, timeperiod)) %>% mutate(timeperiod = ifelse((exit_dates >= tp2 & exit_dates < tp3), 3, timeperiod)) %>% mutate(timeperiod = ifelse((exit_dates >= tp3 & exit_dates < tp4), 4, timeperiod)) %>% mutate(timeperiod = ifelse((exit_dates >= tp4 & exit_dates < tp5), 5, timeperiod)) %>% mutate(timeperiod = ifelse((exit_dates >= tp5 & exit_dates < tp6), 6, timeperiod)) %>% mutate(timeperiod = ifelse((exit_dates >= tp6 & exit_dates < tp7), 7, timeperiod))
+
+# Set the all the rows that are equal to 0 to their respective timeperiods. 
+#---------------------------------------------------------#
+da = da %>% mutate(timeperiod = ifelse(Date < tp1 & timeperiod == 0, 1, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp1 & Date < tp2) & timeperiod == 0, 2, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp2 & Date < tp3) & timeperiod == 0, 3, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp3 & Date < tp4) & timeperiod == 0, 4, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp4 & Date < tp5) & timeperiod == 0, 5, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp5 & Date < tp6) & timeperiod == 0, 6, timeperiod)) %>% mutate(timeperiod = ifelse((Date >= tp6 & Date < tp7) & timeperiod == 0, 7, timeperiod))
+
+# Extract the first row for each ringnr (entry time)
+#---------------------------------------------------------#
+first.row = da %>% filter(!duplicated(RingNR)) 
+
+# Extract the last row (exit time)
+#---------------------------------------------------------#
+last.row = da %>% group_by(RingNR) %>% summarise(exit_date = max(exit_dates), exit_times = max(exit_times), exit_statuses = last(exit_statuses), timeperiods = last(timeperiod)) 
+exit_time = last.row$exit_times
+exit_status = last.row$exit_statuses
+exit_date = last.row$exit_date
+timeperiods = last.row$timeperiods
+
+# Combine the first and last row to the same row
+#---------------------------------------------------------#
+first.row = bind_cols(first.row, data.frame(exit_time))
+first.row = bind_cols(first.row, data.frame(exit_status))
+first.row = bind_cols(first.row, data.frame(exit_date))
+first.row = bind_cols(first.row, data.frame(timeperiods))
+first.row = first.row %>% select(RingNR, Date, Year, CaptureAge, sex, CollarFrequency, entry_time, exit_time, exit_date, exit_status, timeperiod, timeperiods, Area)
+
+# Remove the rows that have entry status = 1 and exit status = 1, which means that there were radiomarked and then never heard from again
+#---------------------------------------------------------#
+first.row = first.row %>% filter(exit_status < 10) # 6 birds were radiomarked and never heard from again
+
+# Find out the number of males and females in the dataset
+#---------------------------------------------------------#
+numberofsex = first.row
+numberofsex.m = numberofsex %>% filter(sex == "M") # 86 males in the dataset
+numberofsex.f = numberofsex %>% filter(sex == "F") # 96 females in the dataset
+
+# Give the birds that have exit status = 2 (alive) a value of 0 (no mortality event) and the rest a value of 1 (mortality event)
+#---------------------------------------------------------#
+first.row = first.row %>% mutate(status = ifelse(exit_status == 2, 0, 1), tag = 1)
+
+# Check the number of mortalities each year
+#---------------------------------------------------------#
+# View(first.row %>% filter(status == 1 & year(exit_date) == 2015)) # 19 mortalities in 2015
+# View(first.row %>% filter(status == 1 & year(exit_date) == 2016)) # 21 mortalities in 2016
+# View(first.row %>% filter(status == 1 & year(exit_date) == 2017)) # 24 mortalities in 2017
+# View(first.row %>% filter(status == 1 & year(exit_date) == 2018)) # 30 mortalities in 2018
+# View(first.row %>% filter(status == 1 & year(exit_date) == 2019)) # 20 mortalities in 2019
+
+```
+*
+*
+Get an estimate of the error rate when estimating sex and find out have many birds have not been assigned sex based on DNA analysis
+```{r}
+##---------------------------------------------------------##
+## Calculate error rate of estimating sex in the           ##
+## field by comparing with DNA analyses                    ##
+##---------------------------------------------------------##
+
+# Subset rawdata by unique RingNR
+#---------------------------------------------------------#
+est.sex = d %>% filter(!duplicated(RingNR))
+
+# If sex from DNA analysis is equal to sex estimated in the field, give a value of 1.
+#---------------------------------------------------------#
+est.sex = est.sex %>% mutate(errors = ifelse(Sex_dna == Sex_fieldbased, 1, 0))
+
+# Remove the rows where we don not have information about sex from both DNA and fieldbased methods
+#---------------------------------------------------------#
+sex.error.est = est.sex$errors
+sex.error.est = as.data.frame(sex.error.est) %>% filter(!is.na(sex.error.est))
+
+# Divide the number of correct estimates by the total number of estimates to get an error rate when estimating sex.
+#---------------------------------------------------------#
+sex.error.est = sum(sex.error.est$sex.error.est) / length(sex.error.est$sex.error.est)
+sex.error.est
+# In 85% of fieldbased sex estimations the result is the same as the DNA analysis, which gives an error rate of 0.15
+
+# Find out how many birds that have not been assigned sex based on DNA analysis
+#---------------------------------------------------------#
+noDNA = d
+noDNA = noDNA %>% filter(!duplicated(RingNR))
+noDNA = noDNA %>% filter(is.na(Sex_dna)) # 17 birds did NOT have their sex assigned by DNA analysis
+noDNA 
+
+```
+*
+*
+How many willow ptarmigan have re-entered the study after they were censored out
+```{r}
+##---------------------------------------------------------##
+## Find out how many willow ptarmigan have re-entered      ##
+## the study after they were censored (lost due to         ##
+##  various reasons)                                       ##
+##---------------------------------------------------------##
+
+# Creating vector of duration of activity for transmitters (in days) to see how many birds have been censored out of the dataset and then entered it again after being shot. 
+#---------------------------------------------------------#
+  reEntry_temp2 = map
+  reEntry_temp2$maxdate = ifelse(map$Status == 3 | map$Status == 4 | map$Status == 5, paste(map$date), as.character(today())) # if recovered dead, last date is recovery date, if not last date is today
+  reEntry_temp2$maxdate = parse_date_time(reEntry_temp2$maxdate, "ymd") # unifying class for date
+  reEntry_temp2$duration = difftime(reEntry_temp2$maxdate, reEntry_temp2$markdate, units = "days")
+  reEntry_temp2 = reEntry_temp2 %>% group_by(RingNR) %>% filter(date==max(date))
+  # weeks of activity for transmitters:
+    reEntryDuration1 = reEntry_temp2 %>% group_by(CollarNR) %>% summarise(duration = sum(duration))
+    # removing collars > 30 months (130 weeks) of activity unless they have been heard sometime in the last 4 months, as battery duration is approx 30 months:
+      reEntry_temp3 = reEntry_temp2 %>% group_by(CollarNR) %>% filter(date==max(date))
+      reEntry_temp3 = reEntry_temp3[,c("CollarNR", "date")]
+      reEntryDuration2 = full_join(reEntryDuration1, reEntry_temp3, by = "CollarNR")
+      reEntryDuration3 = reEntryDuration2 %>% filter(duration > 130)
+      View(reEntryDuration3)
+      reEntryDuration3 = reEntryDuration3 %>% mutate(rentry = 1)
+      reEntry = right_join(reEntryDuration3, map, by = c("CollarNR"))
+      View(reEntry %>% filter(rentry == 1 & Status == 3 & duration > 900))
+      # Compare these ringnr with those in d$RingNR to see if there are any birds that have > 4 months of absence between the date the bird was last heard alive and the date it was shot. 
+      # Seems to be 4 birds that were re-entered into the study (RingNR: 4175757, 4175767, 4175778, 4281309)
+      
+```
+*
+*
+Find the first and last date of the data used for analyses
+```{r}
+##---------------------------------------------------------##
+## Find out start and end dates                            ##
+##---------------------------------------------------------##
+
+# Start date
+#---------------------------------------------------------#
+min.date = d1 %>% filter(Status == 1 & Area != "Fiskløysdalen") # Exclude birds in the pilot
+
+min.date = min.date %>% filter(Year == 2015) 
+min.date = min.date %>% filter(month(dmy(min.date$Date)) == min(month(dmy(min.date$Date))))
+min(min.date$Date) # 16.02.2015
+
+# End date
+#---------------------------------------------------------#
+max.date = d1 %>% filter(Status != 1 & Area != "Fiskløysdalen") # Exclude birds in the pilot
+
+max.date = max.date %>% filter(Year == 2019) 
+max.date = max.date %>% filter(month(dmy(max.date$Date)) == max(month(dmy(max.date$Date))))
+max(max.date$Date) #27.11.2019
+
+```
+*
+*
+Find the elevation of captured willow ptarmigan
+```{r}
+##---------------------------------------------------------##
+## Estimate the range of elevation for captured            ##
+## willow ptarmigan                                        ##
+##---------------------------------------------------------##
+
+# Extracting all capture events from Lifjellet and Guslia (excluding the pilot - Fiskløysdalen)
+#---------------------------------------------------------#
+elev.df = d1 %>% filter(Status == 1 & Area != "Fiskløysdalen") 
+
+# Longitude
+#---------------------------------------------------------#
+x = elev.df$UTM_X
+
+# Latitude
+#---------------------------------------------------------#
+y = elev.df$UTM_Y
+
+# Corresponding Ring numbers
+#---------------------------------------------------------#
+elevRingNR = elev.df$RingNR
+
+# Creating a smaller data frame with only Lat, long and Ring number
+#---------------------------------------------------------#
+elev.df1 = data.frame(x = x, y = y, RingNR = elevRingNR)
+elev.df = elev.df1
+
+# Converting the coordinates to spatial points
+#---------------------------------------------------------#
+sputm = SpatialPoints(elev.df[,1:2], proj4string = CRS("+proj=utm +zone=33 +datum=WGS84 +units=m"))  
+
+# And transforming to the appropriate coordinate system
+#---------------------------------------------------------#
+spgeo = spTransform(sputm, CRS("+proj=longlat +datum=WGS84"))
+
+# Extract raster data from Norway and convert to data frame 
+#---------------------------------------------------------#
+Norway <-getData("GADM", country="NO", level=0)
+Norway_df <- fortify(Norway)
+
+crs_temp_longlat <- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84")
+
+
+# Setting the bounds for the raster
+#---------------------------------------------------------#
+my_bbox <- c(xmin = min(spgeo@coords[,1])-0.2,
+             xmax = max(spgeo@coords[,1])+0.2,
+             ymin = min(spgeo@coords[,2])-0.2,
+             ymax = max(spgeo@coords[,2])+0.2)
+
+temp <- as(extent(my_bbox), 'SpatialPolygons')
+proj4string(temp) <- crs_temp_longlat
+
+# Getting DEM - data
+#---------------------------------------------------------#
+elev1 <- get_elev_raster(locations=temp, z = 12, clip="bbox")
+
+# Mutating the elevation data from the DEM to the elevation data frame
+#---------------------------------------------------------#
+elev.df = elev.df %>% mutate(elevation = extract(elev1, spgeo))
+min(elev.df$elevation) # Lowest willow ptarmigan capture elevation - 458.5482 m.a.s.l
+max(elev.df$elevation) # Highest willow ptarmigan capture elevation - 755.3694 m.a.s.l
+
+# Converting the DEM raster to "SpatialPixelsDataFrame" --> tibble for plotting
+#---------------------------------------------------------#
+test_spdf = as(elev1, "SpatialPixelsDataFrame")
+test_df = as_tibble(test_spdf) %>% rename(value=layer, long=x, lat=y) %>%
+  mutate(Elevation = value)
+
+# Plotting of elevation raster and willow ptarmigan capture points
+#---------------------------------------------------------#
+ggplot() + geom_raster(data = test_df, aes(x = long, y = lat, fill = Elevation)) + geom_point(data = as.data.frame(spgeo@coords), aes(x = spgeo@coords[, 1], y = spgeo@coords[, 2]))
+
+```
+*
+*
+Data management for full year survival analysis
+```{r}
+##---------------------------------------------------------##
+## FINAL DATA MANAGEMENT BEFORE YEARLY SURVIVAL ANALYSIS:  ##
+## -------------------------------                         ##
+## Create new rows for the birds that survive past the     ##
+## 1 August and alter the entry time, timeperiod and       ##
+## capture age for every year of the study.                ##
+##---------------------------------------------------------##
+
+# Make a copy of the rawdata
+#---------------------------------------------------------#
+ptarmigan = first.row
+
+# Adding new lines for the birds that survive past 1 August using a for loop
+#---------------------------------------------------------#
+y = -1
+for (i in 1:10){ # i is here the number of years you want to iterate over
+  y = y + 1
+  ptarmigan = rbind(ptarmigan, ptarmigan %>% filter(exit_date >= paste(year(Date)+y, "-08-01", sep = "")) %>%
+                      mutate(exit_time = exit_time, 
+                              Date = exit_date, tag = tag + i, CaptureAge = "ad", timeperiod = timeperiod + i))
+} # The for loop prints an error when year(Date)+y > max(year(Date)) and breaks out of the loop
+
+# Arranging ptarmigan dataset to sort by RingNR and date
+#---------------------------------------------------------#
+ptarmigan = ptarmigan[order(ptarmigan$RingNR, ptarmigan$Date), ]
+
+# Replace exit times with the new exit times using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 0
+for (i in 1:max(ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  ptarmigan = ptarmigan %>% mutate(exit_time = ifelse(tag == x & lead(tag, n = 1) == (x + 1), as.Date(paste(year(entry_time)+y, "-07-31", sep = "")), exit_time))
+}
+ptarmigan = ptarmigan %>% mutate(exit_time = ifelse(is.na(exit_time), exit_date, exit_time)) %>% mutate(exit_time = as.Date(exit_time, origin = "1970-01-01"))
+
+# Replacing old entry times with the new entry times using a for loop
+#---------------------------------------------------------#
+y = -1
+x = -1
+for (i in 1:max(ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  ptarmigan = ptarmigan %>% mutate(entry_time = ifelse(tag == (x + 2), as.Date(paste(Year+x, "-08-01", sep = ""), origin = "1970-01-01"), entry_time))
+}
+ptarmigan$entry_time = as.Date(ptarmigan$entry_time, origin = "1970-01-01")
+
+# Set an event if mortality
+#---------------------------------------------------------#
+unique(ptarmigan$exit_status)
+ptarmigan = ptarmigan %>% mutate(event = ifelse(exit_status != 2 & lead(tag > 1, n = 1), 0, 1)) %>% mutate(event = ifelse(is.na(event), 1, event)) %>% mutate(event = replace(event, exit_status == 2, 0))  # The event is only for the last observation for each bird that has status == 3, 4, 5 or 6. 
+
+# Change the entry time and exit time to days (Day 1 is 01-08-year, Day 365 is 31-07-year)
+#---------------------------------------------------------#
+ptarmigan = ptarmigan %>% mutate(entry_day = as.numeric(strftime(entry_time, format = "%j")), exit_day = as.numeric(strftime(exit_time, format = "%j"))) # Converts a date to day of the year
+
+# Rearrange the year to start at 1 August and end at 31 July
+#---------------------------------------------------------#
+difftime(ymd("2015-12-31"), ymd("2015-08-01")) # 152 days difference from 1 August to 31 December, add the difference + 1 to the entry times 
+
+# Change entry days to follow the "reformatted year"
+#---------------------------------------------------------#
+entry1 = as.numeric(strftime(ymd("2016-08-01"), format = "%j")) # 1 Aug is either day 214..
+entry2 = as.numeric(strftime(ymd("2019-08-01"), format = "%j")) # or day 213 depending on the year
+ptarmigan = ptarmigan %>% mutate(entry_day = ifelse(entry_day == entry1 | entry_day == entry2, 1, entry_day)) %>% mutate(entry_day = ifelse(entry_day != 1, entry_day + 153, entry_day))
+
+# Change exit days to follow the "reformatted year"
+#---------------------------------------------------------#
+exit1 = as.numeric(strftime(ymd("2015-07-31"), format = "%j")) # 31 July is either day 212...
+exit2 = as.numeric(strftime(ymd("2016-07-31"), format = "%j")) # or day 213 depending on the year
+
+
+ptarmigan = ptarmigan %>% mutate(exit_day = ifelse(exit_day == exit1 | exit_day == exit2, 365, exit_day)) %>% mutate(exit_day1 = ifelse(exit_day < exit1, exit_day + 153, 0)) %>% mutate(exit_day = ifelse(exit_day > exit2 & exit_day < 365, exit_day - exit2, exit_day)) %>% mutate(exit_day = ifelse(exit_day1 > 0, exit_day1, exit_day))
+
+```
+*
+Full year survival analysis (From 1st of August to 31st of July)
+```{r}
+##---------------------------------------------------------##
+## YEARLY SURVIVAL ANALYSIS                                ##
+##---------------------------------------------------------##
+
+# Yearly Survival without covariates
+#---------------------------------------------------------#
+Fullmod1 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ 1, data = ptarmigan)
+summary(Fullmod1)
+ggsurvplot(Fullmod1, conf.int = TRUE, xlab = "Day of the year (From 1 August)", palette = c("maroon"), xlim = c(0, 365), censor.shape = "|", censor.size = 4, legend = "none", break.time.by = 30, font.x = c(16, "bold"), font.y = c(16, "bold"))
+
+# Yearly survival ~ sex
+#---------------------------------------------------------#
+Fullmod2 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(sex), data = ptarmigan)
+summary(Fullmod2)
+ggsurvplot(Fullmod2, conf.int = TRUE, xlab = "Day of the year (From 1 August)", legend.labs = c("Female", "Male"), legend.title = "Sex", palette = c("orange", "steelblue"), linetype = "strata", censor.shape = "|", censor.size = 4, xlim = c(0, 365))
+
+# Yearly survival ~ timeperiod. Subset the data to exclude timeperiod 1 and timeperiod 6 as they are not complete.
+#---------------------------------------------------------#
+tp.df = ptarmigan %>% filter(timeperiod != 1 & timeperiod != 6)
+Fullmod3 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(timeperiod), data = tp.df)
+summary(Fullmod3)
+ggsurvplot(Fullmod3, conf.int = FALSE, xlab = "Day of the year (From 1 August)")
+
+# Testing for covariates effects 
+#---------------------------------------------------------#
+Fullmod1a <- coxph(Surv(entry_day, exit_day, event) ~ 1, data = ptarmigan)	 
+summary(Fullmod1a)
+
+Fullmod2b <- coxph(Surv(entry_day, exit_day, event) ~ factor(sex) + cluster(RingNR), data = ptarmigan)	  
+summary(Fullmod2b)
+
+Fullmod2c <- coxph(Surv(entry_day, exit_day, event) ~ factor(timeperiod) + cluster(RingNR), data = tp.df)	 
+summary(Fullmod2c)
+
+
+# Assessing proportional hazards assumption 
+#---------------------------------------------------------#
+prop_test_Fullmod2b <- cox.zph(Fullmod2b)
+prop_test_Fullmod2c <- cox.zph(Fullmod2c)
+prop_test_Fullmod2b # Assumption about proportional hazards has NOT been met for sex
+prop_test_Fullmod2c # Assumption about proportional hazards has been met for timeperiod
+
+```
+*
+*
+Data management for autumn survival analysis (1 September to 30 November)
+```{r}
+##---------------------------------------------------------##
+## FINAL DATA MANAGEMENT BEFORE AUTUMN SURVIVAL ANALYSIS:  ##
+## -------------------------------                         ##
+## Create new rows for the birds that survive past the     ##
+## 1 September and alter the entry time, timeperiod and    ##
+## capture age for every year of the study.                ##
+##---------------------------------------------------------##
+
+# Make a copy of the rawdata
+#---------------------------------------------------------#
+fall.ptarmigan = first.row
+
+# Adding new lines for the birds that survive past 1 September with a for loop
+#---------------------------------------------------------#
+y = -1
+for (i in 1:10){ # i is here the number of years you want to iterate over
+  y = y + 1
+  fall.ptarmigan = rbind(fall.ptarmigan, fall.ptarmigan %>% filter(exit_date >= paste(year(Date)+y, "-09-01", sep = "")) %>% mutate(exit_time = exit_time, Date = exit_date, tag = tag + i, CaptureAge = "ad", timeperiod = timeperiod + i)) 
+}
+
+# Arranging ptarmigan dataset by RingNR and date
+#---------------------------------------------------------#
+fall.ptarmigan = fall.ptarmigan[order(fall.ptarmigan$RingNR, fall.ptarmigan$Date), ]
+
+# Replace the old exit time with the new exit times using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 0
+for (i in 1:max(fall.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  fall.ptarmigan = fall.ptarmigan %>% mutate(exit_time = ifelse(tag == x & lead(tag, n = 1) == (x + 1), as.Date(paste(year(entry_time)+y, "-08-31", sep = "")), exit_time))
+}
+fall.ptarmigan = fall.ptarmigan %>% mutate(exit_time = ifelse(is.na(exit_time), exit_date, exit_time)) %>% mutate(exit_time = as.Date(exit_time, origin = "1970-01-01"))
+
+# Replacing the old entry times with the new entry times using a for loop
+#---------------------------------------------------------#
+y = - 1
+x = 1
+for (i in 1:max(fall.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  fall.ptarmigan = fall.ptarmigan %>% mutate(entry_time = ifelse(tag == x, as.Date(paste(Year+y, "-09-01", sep = ""), origin = "1970-01-01"), entry_time))
+}
+fall.ptarmigan = fall.ptarmigan %>% mutate(entry_time = as.Date(entry_time, origin = "1970-01-01"))
+
+# Set an event if mortality
+#---------------------------------------------------------#
+unique(fall.ptarmigan$exit_status)
+fall.ptarmigan = fall.ptarmigan %>% mutate(event = ifelse(exit_status != 2 & lead(tag > 1, n = 1), 0, 1)) %>% mutate(event = ifelse(is.na(event), 1, event)) %>% mutate(event = replace(event, exit_status == 2, 0))  # The event is only for the last observation for each bird that has status == 3, 4, 5 or 6. 
+
+# Change the entry times and exit times to days (Day 1 is 01-09-year, Day 365 is 31-08-year)
+#---------------------------------------------------------#
+fall.ptarmigan = fall.ptarmigan %>% mutate(entry_day = as.numeric(strftime(entry_time, format = "%j")), exit_day = as.numeric(strftime(exit_time, format = "%j")))
+
+# Change entry days to follow the autumn willow ptarmigan year
+#---------------------------------------------------------#
+difftime(ymd("2015-12-31"), ymd("2015-09-01")) # 121 days difference from 1 August to 31 December, add the difference + 1 days to the entry and exit times 
+
+entry1 = as.numeric(strftime(ymd("2015-09-01"), format = "%j")) # 1 Sept is either 244...
+entry2 = as.numeric(strftime(ymd("2016-09-01"), format = "%j")) # or 245 depending on the year
+
+fall.ptarmigan = fall.ptarmigan %>% mutate(entry_day = ifelse(entry_day == entry1 | entry_day == entry2, 1, entry_day)) %>% mutate(entry_day = ifelse(entry_day != 1, entry_day + 122, entry_day))
+
+# Change exit days to follow the autumn willow ptarmigan year
+#---------------------------------------------------------#
+exit1 = as.numeric(strftime(ymd("2015-08-31"), format = "%j")) # 31 Aug is either 243...
+exit2 = as.numeric(strftime(ymd("2016-08-31"), format = "%j")) # or 244 depending on the year
+
+fall.ptarmigan = fall.ptarmigan %>% mutate(exit_day = ifelse(exit_day == exit1 | exit_day == exit2, 365, exit_day)) %>% mutate(exit_day1 = ifelse(exit_day < exit1, exit_day + 122, 0)) %>% mutate(exit_day = ifelse(exit_day > exit2 & exit_day < 365, exit_day - exit2, exit_day)) %>% mutate(exit_day = ifelse(exit_day1 > 0, exit_day1, exit_day))
+
+# Reformat the event to only be equal to 1 if the mortality was registered between 1 Sept and 30 Nov
+#---------------------------------------------------------#
+difftime(ymd("2016-11-30"), ymd("2016-09-01")) # 90 Day difference, which means mortalities between difference + 1 days get an event
+
+# Remove the birds that have mortalities after 30 November (91 days)
+#---------------------------------------------------------#
+fall.ptarmigan = fall.ptarmigan %>% filter(entry_day < 92) # Include only the birds entering the study between 1 Sept and 30 Nov
+
+# Mortalities between 1 Sept and 30 Nov get an event
+#---------------------------------------------------------#
+fall.ptarmigan = fall.ptarmigan %>% mutate(event1 = ifelse(exit_day > 91, 0, event)) %>% mutate(exit_day = ifelse(exit_day > 91, 91, exit_day)) %>% mutate(event = event1)
+
+# The number of bird years available for autumn analysis
+#---------------------------------------------------------#
+length(fall.ptarmigan$RingNR) # 161 bird years
+
+```
+*
+Autumn survival analysis (From 1st of September to 30th of November)
+```{r}
+##---------------------------------------------------------##
+## SEASONAL SURVIVAL ANALYSIS: AUTUMN                      ##
+##---------------------------------------------------------##
+
+# Autumn survival without covariates
+#---------------------------------------------------------#
+Fallmod1 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ 1, data = fall.ptarmigan)
+summary(Fallmod1)
+fall.tot.survplot = ggsurvplot(Fallmod1, conf.int = TRUE, xlab = "Day of the year (From September 1st)", palette = c("maroon"), xlim = c(1, 91), censor.shape = "|", censor.size = 4, legend.labs ="", legend.title = "Autumn") 
+fall.tot.survplot
+
+# Autumn survival ~ sex
+#---------------------------------------------------------#
+Fallmod2 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(sex), data = fall.ptarmigan)
+summary(Fallmod2)
+ggsurvplot(Fallmod2, conf.int = TRUE, xlab = "Day of the year (From September 1st)", palette = c("orange", "steelblue"), legend.labs = c("Female", "Male"), linetype = "strata", censor.shape = "|", censor.size = 4, xlim = c(0, 91), legend.title = "Sex")
+
+# Autumn survival ~ timeperiod. Filter out timeperiod 1 as it is not complete (timeperiod 6 will be complete 30 Nov 2019)
+#---------------------------------------------------------#
+fall.ptarmigan.tp = fall.ptarmigan %>% filter(timeperiod != 1)
+Fallmod3 = survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(timeperiod), data = fall.ptarmigan.tp)
+summary(Fallmod3)
+ggsurvplot(Fallmod3, conf.int = FALSE, xlab = "Day of the year (From September 1st)")
+
+# Testing for covariate effects
+#---------------------------------------------------------#
+Fallmod1a <- coxph(Surv(entry_day, exit_day, event) ~ factor(timeperiod) + cluster(RingNR), data = fall.ptarmigan.tp)	 
+summary(Fallmod1a)
+
+Fallmod2b <- coxph(Surv(entry_day, exit_day, event) ~ factor(sex) + cluster(RingNR), data = fall.ptarmigan)
+summary(Fallmod2b)
+
+# Assessing proportional hazards assumption 
+#---------------------------------------------------------#
+prop_test_fallmod1a = cox.zph(Fallmod1a)
+prop_test_fallmod1a # Assumption about proportional hazards has been met
+
+prop_test_Fallmod2b <- cox.zph(Fallmod2b)
+prop_test_Fallmod2b # Assumption about proportional hazards has been met
+
+```
+*
+*
+Data management for winter survival analysis (December 1st to March 31st)
+```{r}
+##---------------------------------------------------------##
+## FINAL DATA MANAGEMENT BEFORE WINTER SURVIVAL ANALYSIS:  ##
+## -------------------------------                         ##
+## Create new rows for the birds that survive past the     ##
+## 1 December and alter the entry time, timeperiod and     ##
+## capture age for every year of the study.                ##
+##---------------------------------------------------------##
+
+# Make a copy of the rawdata
+#---------------------------------------------------------#
+winter.ptarmigan = first.row
+
+# Adding new lines for the birds that survive past December 1 using a for loop 
+#---------------------------------------------------------#
+y = -1
+for (i in 1:10){ # i is here the number of years you want to iterate over
+  y = y + 1
+  winter.ptarmigan = rbind(winter.ptarmigan, winter.ptarmigan %>% filter(exit_date >= paste(year(Date)+y, "-12-01", sep = "")) %>% mutate(exit_time = exit_time, Date = exit_date, tag = tag + i, CaptureAge = "ad", timeperiod = timeperiod + i))
+}
+
+# Sort the data by RingNR and Date
+#---------------------------------------------------------#
+winter.ptarmigan = winter.ptarmigan[order(winter.ptarmigan$RingNR, winter.ptarmigan$Date), ]
+
+# Replace the old exit times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 0
+for (i in 1:max(winter.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  winter.ptarmigan = winter.ptarmigan %>% mutate(exit_time = ifelse(tag == x & lead(tag, n = 1) == (x + 1), as.Date(paste(year(entry_time)+y, "-11-30", sep = "")), exit_time))
+}
+winter.ptarmigan = winter.ptarmigan %>% mutate(exit_time = ifelse(is.na(exit_time), exit_date, exit_time)) %>% mutate(exit_time = as.Date(exit_time, origin = "1970-01-01"))
+
+# Replace the old entry times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 1
+for (i in 1:max(winter.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  winter.ptarmigan = winter.ptarmigan %>% mutate(entry_time = ifelse(tag == x, as.Date(paste(Year+y, "-12-01", sep = ""), origin = "1970-01-01"), entry_time))
+}
+winter.ptarmigan = winter.ptarmigan %>% mutate(entry_time = as.Date(entry_time, origin = "1970-01-01"))
+
+# Set an event if mortality
+#---------------------------------------------------------#
+unique(winter.ptarmigan$exit_status)
+winter.ptarmigan = winter.ptarmigan %>% mutate(event = ifelse(exit_status != 2 & lead(tag > 1, n = 1), 0, 1)) %>% mutate(event = ifelse(is.na(event), 1, event)) %>% mutate(event = replace(event, exit_status == 2, 0))  # The event is only for the last observation for each bird that has status == 3, 4, 5 or 6. 
+
+# Change the entry time and exit time to days (Day 1 is 01-12-year to Day 365 which is 30-11-year)
+#---------------------------------------------------------#
+winter.ptarmigan = winter.ptarmigan %>% mutate(entry_day = as.numeric(strftime(entry_time, format = "%j")), exit_day = as.numeric(strftime(exit_time, format = "%j")))
+
+# Reformat the entry days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+difftime(ymd("2015-12-31"), ymd("2015-12-01")) # 30 days difference from 1 December to 31 December, add these days + 1 to the entry and exit times 
+
+entry1 = as.numeric(strftime(ymd("2015-12-01"), format = "%j")) # 1 December is either day 335...
+entry2 = as.numeric(strftime(ymd("2016-12-01"), format = "%j")) # or day 336 depending on the year
+winter.ptarmigan = winter.ptarmigan %>% mutate(entry_day = ifelse(entry_day == entry1 | entry_day == entry2, 1, entry_day))
+
+# Reformat the exit days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+exit1 = as.numeric(strftime(ymd("2015-11-30"), format = "%j")) # 30 Nov is either day 334...
+exit2 = as.numeric(strftime(ymd("2016-11-30"), format = "%j")) # or day 335 depending on the year
+
+winter.ptarmigan = winter.ptarmigan %>% mutate(exit_day = ifelse(exit_day == exit1 | exit_day == exit2, 365, exit_day)) %>% mutate(exit_day1 = ifelse(exit_day < exit1, exit_day + 31, 0)) %>% mutate(exit_day = ifelse(exit_day > exit2 & exit_day < 365, exit_day - exit2, exit_day)) %>% mutate(exit_day = ifelse(exit_day1 > 0, exit_day1, exit_day))
+
+# Change event to only be equal to 1 if the mortality was registered from 1 December to 31 March
+#---------------------------------------------------------#
+difftime(ymd("2017-03-31"), ymd("2016-12-01")) # 120 Day difference, which means mortalities between day 1 to 121 get an event
+
+# Give birds that have a mortality within the winter period (120 days) an event 
+#---------------------------------------------------------#
+winter.ptarmigan = winter.ptarmigan %>% mutate(event1 = ifelse(exit_day > 121, 0, event)) %>% mutate(exit_day = ifelse(exit_day > 121, 121, exit_day)) %>% mutate(event = event1)
+
+# The number of bird years available for winter analysis
+#---------------------------------------------------------#
+length(winter.ptarmigan$RingNR) # 251 bird years
+
+```
+*
+Winter survival analysis (From 1st of December to 31st of March)
+```{r}
+##---------------------------------------------------------##
+## SEASONAL SURVIVAL ANALYSIS: WINTER                      ##
+##---------------------------------------------------------##
+
+# Winter survival without covariates
+#---------------------------------------------------------#
+wintermod1 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ 1, data = winter.ptarmigan)
+summary(wintermod1)
+winter.tot.survplot = ggsurvplot(wintermod1, conf.int = TRUE, xlab = "Day of the year (From December 1st)", palette = c("maroon"), break.time.by = 30, censor.shape = "|", censor.size = 4, legend.labs = "", legend.title = "Winter")
+
+# Winter survival ~ sex
+#---------------------------------------------------------#
+wintermod2 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(sex) + cluster(RingNR), data = winter.ptarmigan)
+summary(wintermod2)
+ggsurvplot(wintermod2, conf.int = TRUE, xlab = "Day of the year (From December 1st)", palette = c("orange", "steelblue"), legend.title = "Sex", legend.labs = c("Female", "Male"), linetype = "strata") 
+
+# Winter survival ~ timeperiod
+#---------------------------------------------------------#
+winter.ptarmigan.tp = winter.ptarmigan %>% filter(timeperiod != 1 & timeperiod != 6)
+wintermod3 = survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(timeperiod), data = winter.ptarmigan.tp)
+summary(wintermod3)
+ggsurvplot(wintermod3, conf.int = FALSE, xlab = "Day of the year (From December 1st)")
+
+# Testing for an effect of the covariates 
+#---------------------------------------------------------#
+wintermod1a <- coxph(Surv(entry_day, exit_day, event) ~ factor(timeperiod) + cluster(RingNR), data = winter.ptarmigan.tp)	 
+summary(wintermod1a)
+
+wintermod2b <- coxph(Surv(entry_day, exit_day, event) ~ factor(sex) + cluster(RingNR), data = winter.ptarmigan)	  
+summary(wintermod2b)
+
+# Assessing proportional hazards assumption
+#---------------------------------------------------------#
+prop_test_wintermod1a = cox.zph(wintermod1a)
+prop_test_wintermod1a # Assumption about proportional hazards has been met
+
+prop_test_wintermod2b <- cox.zph(wintermod2b)
+prop_test_wintermod2b # Assumption about proportional hazards has been met
+
+```
+*
+*
+Data management for spring survival analysis (1st of April to May 31st)
+```{r}
+##---------------------------------------------------------##
+## FINAL DATA MANAGEMENT BEFORE SPRING SURVIVAL ANALYSIS:  ##
+## -------------------------------                         ##
+## Create new rows for the birds that survive past the     ##
+## 1 April and alter the entry time, timeperiod and        ##
+## capture age for every year of the study.                ##
+##---------------------------------------------------------##
+
+# Make a copy of the rawdata
+#---------------------------------------------------------#
+spring.ptarmigan = first.row
+
+# Adding new lines for the birds that survive past April 1 using a for loop 
+#---------------------------------------------------------#
+y = -1
+for (i in 1:10){ # i is here the number of years you want to iterate over
+  y = y + 1
+  spring.ptarmigan = rbind(spring.ptarmigan, spring.ptarmigan %>% filter(exit_date >= paste(year(Date)+y, "-04-01", sep = "")) %>% mutate(exit_time = exit_time, Date = exit_date, tag = tag + i, timeperiod = timeperiod + i))
+}
+
+# Sort the data by RingNR and date
+#---------------------------------------------------------#
+spring.ptarmigan = spring.ptarmigan[order(spring.ptarmigan$RingNR, spring.ptarmigan$Date), ]
+
+# Replace the old exit times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 0
+for (i in 1:max(spring.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  spring.ptarmigan = spring.ptarmigan %>% mutate(exit_time = ifelse(tag == x & lead(tag, n = 1) == (x + 1), as.Date(paste(year(entry_time)+y, "-03-31", sep = "")), exit_time))
+}
+spring.ptarmigan = spring.ptarmigan %>% mutate(exit_time = ifelse(is.na(exit_time), exit_date, exit_time), exit_time = as.Date(exit_time, origin = "1970-01-01"))
+
+# Replace the old entry times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 1
+for (i in 1:max(spring.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  spring.ptarmigan = spring.ptarmigan %>% mutate(entry_time = ifelse(tag == x, as.Date(paste(Year+y, "-04-01", sep = ""), origin = "1970-01-01"), entry_time))
+}
+spring.ptarmigan = spring.ptarmigan %>% mutate(entry_time = as.Date(entry_time, origin = "1970-01-01"))
+
+# Set an event if mortality
+#---------------------------------------------------------#
+unique(spring.ptarmigan$exit_status)
+spring.ptarmigan = spring.ptarmigan %>% mutate(event = ifelse(exit_status != 2 & lead(tag > 1, n = 1), 0, 1)) %>% mutate(event = ifelse(is.na(event), 1, event)) %>% mutate(event = replace(event, exit_status == 2, 0))  # The event is only for the last observation for each bird that has status == 3, 4, 5 or 6. 
+
+# Change the entry times and exit times to days (Day 1 is 01-04-year to Day 365 which is 31-03-year)
+#---------------------------------------------------------#
+spring.ptarmigan = spring.ptarmigan %>% mutate(entry_day = as.numeric(strftime(entry_time, format = "%j")), exit_day = as.numeric(strftime(exit_time, format = "%j")))
+
+# Reformat the entry days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+difftime(ymd("2015-12-31"), ymd("2015-04-01")) # 274 days difference from 1 April to 31 December, add these days + 1 to the entry times and exit times
+
+entry1 = as.numeric(strftime(ymd("2015-04-01"), format = "%j")) # 1 April is either day 91...
+entry2 = as.numeric(strftime(ymd("2016-04-01"), format = "%j")) # or day 92 depending on the year
+
+spring.ptarmigan = spring.ptarmigan %>% mutate(entry_day = ifelse(entry_day == entry1 | entry_day == entry2, 1, entry_day)) %>% mutate(entry_day = ifelse(entry_day != 1, entry_day + 275, entry_day))
+
+# Reformat the exit days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+exit1 = as.numeric(strftime(ymd("2015-03-31"), format = "%j")) # 31 March is either day 90...
+exit2 = as.numeric(strftime(ymd("2016-03-31"), format = "%j")) # or day 91 depending on the year
+
+spring.ptarmigan = spring.ptarmigan %>% mutate(exit_day = ifelse(exit_day == exit1 | exit_day == exit2, 365, exit_day)) %>% mutate(exit_day1 = ifelse(exit_day < exit1, exit_day + 275, 0)) %>% mutate(exit_day = ifelse(exit_day > exit2 & exit_day < 365, exit_day - exit2, exit_day)) %>% mutate(exit_day = ifelse(exit_day1 > 0, exit_day1, exit_day))
+
+# Change event to only be equal to 1 if the mortality was registered from 1 April to 31 May
+#---------------------------------------------------------#
+difftime(ymd("2016-05-31"), ymd("2016-04-01")) # 60 Day difference, which means mortalities between day 1 to 61 get an event
+
+# Give birds that have a mortality within the spring period (91 days) an event 
+#---------------------------------------------------------#
+spring.ptarmigan = spring.ptarmigan %>% filter(entry_day == 1)
+spring.ptarmigan = spring.ptarmigan %>% mutate(event1 = ifelse(exit_day > 61, 0 , event)) %>% mutate(exit_day = ifelse(exit_day > 61, 61, exit_day)) %>% mutate(event = event1)
+
+# Alter the capture age to the correct format
+#---------------------------------------------------------#
+spring.ptarmigan = spring.ptarmigan %>% mutate(CaptureAge = ifelse(tag > 2, "ad", CaptureAge))
+
+# The number of bird years available for spring analysis
+#---------------------------------------------------------#
+length(spring.ptarmigan$RingNR) # 232 bird years
+
+```
+*
+Spring survival analysis (1st of April to May 31st)
+```{r}
+##---------------------------------------------------------##
+## SEASONAL SURVIVAL ANALYSIS: SPRING                      ##
+##---------------------------------------------------------##
+
+# Spring survival without covariates
+#---------------------------------------------------------#
+springmod1 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ 1, data = spring.ptarmigan)
+summary(springmod1)
+spring.tot.survplot = ggsurvplot(springmod1, conf.int = TRUE, xlab = "Day of the year (From April 1st)", palette = "maroon", censor.shape = "|", censor.size = 4, legend.labs = "", legend.title = "Spring")
+
+# Spring survival ~ sex
+#---------------------------------------------------------#
+springmod2 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(sex), data = spring.ptarmigan)
+summary(springmod2)
+ggsurvplot(springmod2, conf.int = TRUE, xlab = "Day of the year (From April 1st)", palette = c("orange", "steelblue"), legend.title = "Sex", legend.labs = c("Female", "Male"), linetype = "strata") 
+
+# Spring survival ~ timeperiod
+#---------------------------------------------------------#
+spring.ptarmigan.tp = spring.ptarmigan %>% filter(timeperiod != 1 & timeperiod != 6)
+springmod3 = survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(timeperiod), data = spring.ptarmigan.tp)
+summary(springmod3)
+ggsurvplot(springmod3, conf.int = FALSE, xlab = "Day of the year (From April 1st)")
+
+# Spring survival ~ capture age
+#---------------------------------------------------------#
+springmod4 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(CaptureAge), data = spring.ptarmigan)
+summary(springmod4)
+ggsurvplot(springmod4, conf.int = TRUE, xlab = "Day of the year (From April 1st)", palette = c("orange", "steelblue"), legend.title = "Capture Age", legend.labs = c("Adult", "Juvenile"), linetype = "strata", censor.shape = "|", censor.size = 4)
+
+# Testing for an effect of the covariates 
+#---------------------------------------------------------#
+springmod1a <- coxph(Surv(entry_day, exit_day, event) ~ factor(timeperiod) + cluster(RingNR), data = spring.ptarmigan.tp)	 
+summary(springmod1a)
+
+springmod2b <- coxph(Surv(entry_day, exit_day, event) ~ factor(sex) + cluster(RingNR), data = spring.ptarmigan)	  
+summary(springmod2b)
+
+springmod3c <- coxph(Surv(entry_day, exit_day, event) ~ factor(CaptureAge) + cluster(RingNR), data = spring.ptarmigan)	  
+summary(springmod3c)
+
+springmod4d <- coxph(Surv(entry_day, exit_day, event) ~ factor(CaptureAge) + cluster(RingNR), data = spring.ptarmigan.adjuv.m)	  
+summary(springmod4d)
+
+# Assessing proportional hazards assumption 
+#---------------------------------------------------------#
+prop_test_springmod1a = cox.zph(springmod1a)
+prop_test_springmod1a # Assumption about proportional hazards has been met
+
+prop_test_springmod2b <- cox.zph(springmod2b)
+prop_test_springmod2b # Assumption about proportional hazards has been met
+
+prop_test_springmod3c <- cox.zph(springmod3c)
+prop_test_springmod3c # Assumption about proportional hazards has been met
+
+```
+*
+*
+Data management for summer survival analysis (1st of June to August 31st)
+```{r}
+##---------------------------------------------------------##
+## FINAL DATA MANAGEMENT BEFORE SUMMER SURVIVAL ANALYSIS:  ##
+## -------------------------------                         ##
+## Create new rows for the birds that survive past the     ##
+## 1 June and alter the entry time, timeperiod and         ##
+## capture age for every year of the study.                ##
+##---------------------------------------------------------##
+
+# Make a copy of the rawdata
+#---------------------------------------------------------#
+summer.ptarmigan = first.row
+
+# Adding new lines for the birds that survive past June 1 using a for loop
+#---------------------------------------------------------#
+y = -1
+for (i in 1:10){ # i is here the number of years to iterate over
+  y = y + 1
+  summer.ptarmigan = rbind(summer.ptarmigan, summer.ptarmigan %>% filter(exit_date >= paste(year(Date)+y, "-06-01", sep = "")) %>% mutate(exit_time = exit_time, Date = exit_date, tag = tag + i, CaptureAge = "ad", timeperiod = timeperiod + i))
+}
+
+# Sort the data by RingNR and date
+#---------------------------------------------------------#
+summer.ptarmigan = summer.ptarmigan[order(summer.ptarmigan$RingNR, summer.ptarmigan$Date), ]
+
+# Replace the old exit times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 0
+for (i in 1:max(summer.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  summer.ptarmigan = summer.ptarmigan %>% mutate(exit_time = ifelse(tag == x & lead(tag, n = 1) == (x + 1), as.Date(paste(year(entry_time)+y, "-05-31", sep = "")), exit_time))
+}
+summer.ptarmigan = summer.ptarmigan %>% mutate(exit_time = ifelse(is.na(exit_time), exit_date, exit_time)) %>% mutate(exit_time = as.Date(exit_time, origin = "1970-01-01"))
+
+# Replace the old entry times with the new using a for loop
+#---------------------------------------------------------#
+y = -1
+x = 1
+for(i in 1:max(summer.ptarmigan$tag)){
+  y = y + 1
+  x = x + 1
+  summer.ptarmigan = summer.ptarmigan %>% mutate(entry_time = ifelse(tag == x, as.Date(paste(Year+y, "-06-01", sep = ""), origin = "1970-01-01"), entry_time))
+}
+summer.ptarmigan = summer.ptarmigan %>% mutate(entry_time = as.Date(entry_time, origin = "1970-01-01"))
+
+# Set an event if mortality
+#---------------------------------------------------------#
+unique(summer.ptarmigan$exit_status)
+summer.ptarmigan = summer.ptarmigan %>% mutate(event = ifelse(exit_status != 2 & lead(tag > 1, n = 1), 0, 1)) %>% mutate(event = ifelse(is.na(event), 1, event)) %>% mutate(event = replace(event, exit_status == 2, 0))  # The event is only for the last observation for each bird that has status == 3, 4, 5 or 6. 
+
+# Change the entry times and exit times to days (Day 1 is 01-04-year to Day 365 which is 31-03-year)
+#---------------------------------------------------------#
+summer.ptarmigan = summer.ptarmigan %>% mutate(entry_day = as.numeric(strftime(entry_time, format = "%j")), exit_day = as.numeric(strftime(exit_time, format = "%j")))
+
+# Reformat the entry days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+difftime(ymd("2015-12-31"), ymd("2015-06-01")) # 213 days difference from 1 June to 31 December, add these days + 1 to the entry times and exit times
+
+entry1 = as.numeric(strftime(ymd("2015-06-01"), format = "%j")) # 1 June is either day 152..
+entry2 = as.numeric(strftime(ymd("2016-06-01"), format = "%j")) # or day 153 depending on the year
+
+summer.ptarmigan = summer.ptarmigan %>% mutate(entry_day = ifelse(entry_day == entry1 | entry_day == entry2, 1, entry_day)) %>% mutate(entry_day = ifelse(entry_day != 1, entry_day + 214, entry_day))
+
+# Reformat the exit days to follow the new willow ptarmigan year
+#---------------------------------------------------------#
+exit1 = as.numeric(strftime(ymd("2015-05-31"), format = "%j")) # 31 May is either day 151..
+exit2 = as.numeric(strftime(ymd("2016-05-31"), format = "%j")) # or day 152 depending on the year
+
+summer.ptarmigan = summer.ptarmigan %>% mutate(exit_day = ifelse(exit_day == exit1 | exit_day == exit2, 365, exit_day)) %>% mutate(exit_day1 = ifelse(exit_day < exit1, exit_day + 214, 0)) %>% mutate(exit_day = ifelse(exit_day > exit2 & exit_day < 365, exit_day - exit2, exit_day)) %>% mutate(exit_day = ifelse(exit_day1 > 0, exit_day1, exit_day))
+
+# Change event to only be equal to 1 if the mortality was registered from 1 June to 31 August
+#---------------------------------------------------------#
+difftime(ymd("2016-08-31"), ymd("2016-06-01")) # 91 Day difference, which means mortalities between day 1 to 92 get an event
+
+# Give the birds that have a mortality within the summer period (92 days) an event
+#---------------------------------------------------------#
+summer.ptarmigan = summer.ptarmigan %>% filter(entry_day == 1)
+summer.ptarmigan = summer.ptarmigan %>% mutate(event1 = ifelse(exit_day > 91, 0, event), exit_day = ifelse(exit_day > 91, 91, exit_day)) %>% mutate(event = event1)
+
+which(summer.ptarmigan$entry_day >= summer.ptarmigan$exit_day) # One instance where entry day (2015-06-01) == exit day (2015-06-02) --> increase exit day to the correct day (day 2) 
+summer.ptarmigan = summer.ptarmigan %>% mutate(exit_day = ifelse(entry_day == exit_day, 2, exit_day))
+
+# The number of bird years available for summer analysis
+#---------------------------------------------------------#
+length(summer.ptarmigan$RingNR) # 206 bird years available
+
+```
+*
+Summer survival analysis (1st of June to August 31st)
+```{r}
+##---------------------------------------------------------##
+## SEASONAL SURVIVAL ANALYSIS: SUMMER                      ##
+##---------------------------------------------------------##
+
+# Summer survival without covariates
+#---------------------------------------------------------#
+summermod1 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ 1, data = summer.ptarmigan)
+summary(summermod1)
+summer.tot.survplot = ggsurvplot(summermod1, conf.int = TRUE, xlab = "Day of the year (From June 1st)", palette = "maroon", xlim = c(1, 91), legend.title = "Summer", legend.labs = "", censor.shape = "|", censor.size = 4)
+
+# Summer survival ~ sex
+#---------------------------------------------------------#
+summermod2 <- survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(sex), data = summer.ptarmigan)
+summary(summermod2)
+ggsurvplot(summermod2, conf.int = TRUE, xlab = "Day of the year (From June 1st)", palette = c("orange", "steelblue"), legend.title = "Sex", legend.labs = c("Female", "Male"), censor.shape = "|", censor.size = 4, xlim = c(1, 92), linetype = "strata")
+
+# Summer survival ~ timeperiod
+#---------------------------------------------------------#
+summer.ptarmigan.tp = summer.ptarmigan %>% filter(timeperiod != 1 & timeperiod != 6)
+summermod3 = survfit(Surv(time = entry_day, time2 = exit_day, event = event) ~ factor(timeperiod), data = summer.ptarmigan.tp)
+summary(summermod3)
+ggsurvplot(summermod3, conf.int = FALSE, xlab = "Day of the year (From June 1st)")
+
+# Testing for an effect of the covariates 
+#---------------------------------------------------------#
+summermod1a <- coxph(Surv(entry_day, exit_day, event) ~ factor(timeperiod) + cluster(RingNR), data = summer.ptarmigan.tp)	 
+summary(summermod1a)
+
+summermod2b <- coxph(Surv(entry_day, exit_day, event) ~ factor(sex) + cluster(RingNR), data = summer.ptarmigan)	  
+summary(summermod2b)
+
+# Assessing proportional hazards assumption 
+#---------------------------------------------------------#
+prop_test_summermod1a = cox.zph(summermod1a)
+prop_test_summermod1a # Assumption about proportional hazards has NOT been met
+
+prop_test_summermod2b = cox.zph(summermod2b)
+prop_test_summermod2b # Assumption about proportional hazards has been met
+
+```
+*
+*
+The proportion of willow ptarmigan harvested
+```{r}
+##---------------------------------------------------------##
+## Calculating the proportion of willow ptarmigan          ## 
+## harvested                                               ##
+##---------------------------------------------------------##
+
+# How many willow ptarmigan harvest
+#---------------------------------------------------------#
+shotSeason = ptarmigan %>% filter(exit_status == 3)
+length(unique(shotSeason$RingNR)) # 38 birds killed by harvest in total
+
+# How many willow ptarmigan alive at the start of the hunting season
+#---------------------------------------------------------#
+fallAvail = fall.ptarmigan %>% filter(exit_day > 9) # 146 birds available to be shot during the fall (10 September)
+
+# Have there been any willow ptarmigan that "returned" to the study after the start of the hunting season
+#---------------------------------------------------------#
+shotWinter = winter.ptarmigan %>% filter(exit_status == 3 & exit_day < 121)
+length(unique(shotWinter$RingNR)) # 2 birds shot during winter
+difftime(dmy("28.02.2016"), dmy("01.12.2015"))
+winterAvail = winter.ptarmigan %>% filter(entry_day == 1) # 69 birds available to be shot from december until the end of february
+
+winterAvail$RingNR %in% fallAvail$RingNR # No new birds have returned in winter -> total of 146 birds available for the whole hunting season
+
+# Proportion of willow ptarmigan harveted
+#---------------------------------------------------------#
+38 / 146 = 0.260274 # 26% of tagged birds that were alive at the start of the hunting season have been shot
+
+```
+*
+*
+Obtain cause-specific mortality rates.
+```{r}
+##---------------------------------------------------------##
+## Investigate mortality: Annual and autumn only           ##
+##---------------------------------------------------------##
+
+# Natural mortality for the full year
+#---------------------------------------------------------#
+cause.tb = select(ptarmigan, RingNR, Date, Year, sex, CaptureAge, exit_status, tag, status, entry_day, exit_day, event) 
+
+# Create the cause of death variable, shot == 1, natural == 2, censored == 0
+#---------------------------------------------------------#
+cause.tb = cause.tb %>% mutate(cause = ifelse(exit_status == 3 & event == 1, yes = 1, no = 100)) %>%
+  mutate(cause = ifelse(exit_status == 3 & event == 0, yes = 0, cause)) %>%
+  mutate(cause = ifelse(exit_status == 2, yes = 0, cause)) %>%
+  mutate(cause = ifelse((exit_status == 4 | exit_status == 5 | exit_status == 6) & event == 1, yes = 2, cause)) %>%
+  mutate(cause = ifelse((exit_status == 4 | exit_status == 5 | exit_status == 6) & event == 0, yes = 0, cause))
+
+cause.tb = rename(cause.tb, ent = entry_day, exit = exit_day)
+nat.mort = cause.survival(cause.tb, 2)
+nat.mort # Natural mortality risk
+
+# sshzd estimates a smooth hazard curve using smoothing splines. 
+# Then, hzdrate.sshzd evaluates that function to get time-specific hazard rates based on the function estimates with sshzd.
+#---------------------------------------------------------#
+hz1 = sshzd(Surv(exit, cause == 2, ent) ~ exit, data = cause.tb, alpha = 0.5) # Natural. Note that alpha = 0.5 is not the default value and results in less smoothing
+hz2 = sshzd(Surv(exit, cause == 1, ent) ~ exit, data = cause.tb, alpha = 0.5) # Harvest
+hz3 = sshzd(Surv(exit,  cause == 1 | cause == 2, ent) ~ exit, data = cause.tb, alpha = ) # Both
+tt = seq(1,365,leng=365)
+hh1 = hzdrate.sshzd(hz1,tt)
+hh2 = hzdrate.sshzd(hz2,tt)
+hh3 = hzdrate.sshzd(hz3,tt)
+# Hazard rates will be used for figures (See Figures section)
+
+# Harvest mortality for the full year
+#---------------------------------------------------------#
+harv.mort = cause.survival(cause.tb, 1)
+harv.mort # Harvest mortality risk
+
+# Harvest mortality for autumn only
+#---------------------------------------------------------#
+fall.cause = fall.ptarmigan %>% select(RingNR, Date, Year, sex, CaptureAge, exit_status, timeperiod, tag, status, entry_day, exit_day, event)
+fall.cause = fall.cause %>% mutate(cause = ifelse(exit_status == 3 & event == 1, yes = 1, no = 100)) %>%
+  mutate(cause = ifelse(exit_status == 3 & event == 0, yes = 0, cause)) %>%
+  mutate(cause = ifelse(exit_status == 2, yes = 0, cause)) %>%
+  mutate(cause = ifelse((exit_status == 4 | exit_status == 5 | exit_status == 6) & event == 1, yes = 2, cause)) %>%
+  mutate(cause = ifelse((exit_status == 4 | exit_status == 5 | exit_status == 6) & event == 0, yes = 0, cause))
+fall.cause = rename(fall.cause, ent = entry_day, exit = exit_day)
+fall.harv.mort = cause.survival(fall.cause, 1)
+fall.harv.mort # Harvest mortality risk for autumn
+
+# Natural mortality for autumn only
+#---------------------------------------------------------#
+fall.nat.mort = cause.survival(fall.cause, 2)
+fall.nat.mort # Natural mortality risk for autumn
+
+```
+*
+*
+Examine the effect of sex in harvested and non-harvested birds.
+```{r}
+#############################################################
+## TO MAKE STRATIFICATION POSSIBLE WE TRANSFORM THE DATA   ##
+## FOLLOWING CODES AND DESCRIPTIONS GIVEN IN HEISEY &      ##
+## PATTERSON 2006; J WILDL MANAGEMENT 70(6): 1544-1555).   ##
+## THE COMPLETE CODE BELOW IS NOT GIVEN IN THE CITED       ##
+## REFERENCE, SO IT WAS DEVELOPED BY                       ##
+## SANDERCOCK ET AL., 2011	                               ##
+#############################################################
+          
+# Data management using the cause-specific mortality dataset during autumn created above 
+#---------------------------------------------------------#
+temp1 <- fall.cause									# Making shot-strata	
+temp1 <- temp1 %>% mutate(event2 = ifelse(cause == 1 & event == 1, 1, 0))	# Making variable "Event2"; 1 if cause of death is "Shot", 0 otherwise (i.e. Alive or other causes of death))
+cause4 <- rep(1, length.out = length(temp1$RingNR))			# making varible "Cause4"; a column containing only 1's 	
+temp1 <- bind_cols(temp1, data.frame(cause4))						    # merging dataset (so far - called "temp1") array "Cause4"
+strata <- rep(1, length.out = length(temp1$RingNR))			# making variable strate (a column with only 1's) - representing the harvesting strata
+temp1 <- bind_cols(temp1, data.frame(strata))						# merging data set ("temp1") with new array "strata"	
+          
+temp2 <- fall.cause								# making other-strata
+temp2 <- temp2 %>% mutate(event2 = ifelse(cause == 2 & event == 1, 2, 0))	# same as for strata above; but "cause4" and "strata" is set to 2 - to represent "other-strata"
+cause4 <- rep(2, length.out = length(temp2$RingNR))
+temp2 <-bind_cols(temp2, data.frame(cause4))
+strata <- rep(2, length.out = length(temp2$RingNR))
+temp2 <- bind_cols(temp2, data.frame(strata))
+          
+fall.cause.mort <- rbind(temp1, temp2)			# merging the two data tables above - 
+fall.cause.mort = fall.cause.mort %>% mutate(event2 = ifelse(event2 == 2, 1, event2), sex = ifelse(sex == "M", 1, 0)) # Male is 1, female is 0
+fall.cause.mort = transform(fall.cause.mort, sex.harv = fall.cause.mort$sex*(fall.cause.mort$strata == 1))
+fall.cause.mort = transform(fall.cause.mort, sex.nat = fall.cause.mort$sex*(fall.cause.mort$strata != 1))
+
+# Test if there is a difference between sex when it comes to harvest and natural mortality
+#---------------------------------------------------------#
+fall.cause.mort.harv = fall.cause.mort %>% filter(strata == 1)
+fall.cause.mort.harv.mod = coxph(Surv(ent, exit, event2) ~ factor(sex) + cluster(RingNR), data = fall.cause.mort.harv)
+fall.cause.mort.harv.mod
+
+fall.cause.mort.nat = fall.cause.mort %>% filter(strata == 2)
+fall.cause.mort.nat.mod = coxph(Surv(ent, exit, event2) ~ factor(sex) + cluster(RingNR), data = fall.cause.mort.nat)
+fall.cause.mort.nat.mod
+
+```
+*
+*
+Figures
+```{r}
+##---------------------------------------------------------##
+## Create all figures to be used in the paper              ##
+##---------------------------------------------------------##
+
+# Annual survival
+#---------------------------------------------------------#
+ggsurvplot(Fullmod1, conf.int = TRUE,
+           xlab = "Days from 1. August", ylab="Survival", 
+           palette = c("darkorange"), xlim = c(0, 365), 
+           ggtheme=theme_minimal(), legend="none", 
+           font.size = 15, censor.shape = "|", censor.size = 4, break.time.by = 60)
+
+fullmod.df = data.frame(time = Fullmod1$time)
+fullmod.df = fullmod.df %>% mutate(surv = Fullmod1$surv, lower = Fullmod1$lower, upper = Fullmod1$upper)
+
+cens.day = ptarmigan %>% filter(event == 0)
+cens.day = cens.day$exit_day
+cens.day = sort(unique(cens.day))
+
+full.plot = ggplot(data = fullmod.df, aes(x = time, y = surv)) + 
+  theme(axis.text.x = element_text(hjust = , vjust = -0.5, size = 10, angle = 90), 
+        axis.text.y = element_text(size = 10), 
+        axis.ticks.length.x = unit(0.25, "cm"), 
+        panel.background = element_rect(fill = "white", colour = "white"), 
+        panel.grid.major = element_line(size = 0.5, linetype = "solid", colour = ("#e6e6e6")), 
+        axis.title.x = element_text(margin = margin(10), size = 10), 
+        axis.title.y = element_text(margin = margin(r=10), size = 10),
+        title = element_text(size = 8),
+        plot.tag.position = c(0.1, 1.08), plot.margin = unit(c(0.8, 0, 0, 0), "cm")) + 
+  geom_line(color = "steelblue", size = 0.6) + 
+  scale_x_continuous(breaks = seq(from = 1, to = 395.4167, by = 30.41667), 
+                     labels = paste0(c("", "Aug", "Sept", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "June", "July")), 
+                     minor_breaks = seq(from = 1, to = 395.4167, by = 30.41667))  + 
+  geom_ribbon(aes(ymin = surv, ymax = upper), alpha = 0.1) + 
+  geom_ribbon(aes(ymin = surv, ymax = lower), alpha = 0.1) + 
+  xlab("Month") + 
+  ylab("") + 
+  labs(tag = "(a)") +
+  ylim(0, 1) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2))
+full.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.day = append(cens.day, rep(0, 73))
+y.prob = 0
+which.cens = c()
+for(i in 1:27){
+  which.cens = append(which.cens, which(cens.day[i] == fullmod.df$time))
+  y.prob = append(y.prob, fullmod.df$surv[which.cens[i]])
+}
+y.prob = y.prob[2:28]
+
+counter = 0
+for(i in cens.day){
+  if(i > 0){
+    counter = counter + 1
+    full.plot = full.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.03, color = "steelblue4", size = 0.3)
+    full.plot = full.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.03, color = "steelblue4", size = 0.3)
+  }
+}
+
+full.plot
+# ggsave("fullplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+
+# FIGURES: Autumn survival
+#---------------------------------------------------------#
+ggsurvplot(Fallmod2, conf.int = TRUE, xlab = "Day of the year (From September 1st)", palette = c("darkorange", "steelblue"), legend.labs = c("Female", "Male"), linetype = "strata", censor.shape = "|", censor.size = 4, xlim = c(0, 91), legend.title = "Sex")
+
+fallmodf.df = data.frame(time = Fallmod2$time[1:25])
+fallmodm.df = data.frame(time = Fallmod2$time[26:56])
+
+fallmodf.df = fallmodf.df %>% mutate(surv = Fallmod2$surv[1:25], lower = Fallmod2$lower[1:25], upper = Fallmod2$upper[1:25], Sex = "Female")
+fallmodm.df = fallmodm.df %>% mutate(surv = Fallmod2$surv[26:56], lower = Fallmod2$lower[26:56], upper = Fallmod2$upper[26:56], Sex = "Male")
+
+fallmod.df = rbind(fallmodf.df, fallmodm.df)
+
+cens.day = fall.ptarmigan %>% filter(event == 0)
+cens.dayf = cens.day %>% filter(sex == "F")
+cens.dayf = cens.dayf$exit_day
+cens.dayf = sort(unique(cens.dayf))
+cens.daym = cens.day %>% filter(sex == "M")
+cens.daym = cens.daym$exit_day
+cens.daym = sort(unique(cens.daym))
+
+mycolours = c("darkorange", "steelblue")
+
+fall.plot = ggplot(data = fallmod.df, aes(x = time, y = surv, color = Sex, linetype = Sex)) + 
+  geom_step(data = fallmod.df %>% filter(Sex == "Female"), size = 0.5) + 
+  geom_step(data = fallmod.df %>% filter(Sex == "Male"), size = 0.5) +
+  scale_x_continuous(breaks = seq(from = 1, to = 121.6667, by = 30.41667), 
+                     labels = paste0(c("Sept", "Oct", "Nov", "")), 
+                     minor_breaks = seq(from = 1, to = 121.6667, by = 30.41667)) + 
+  theme(axis.text.x = element_text(hjust = -1.6), text = element_text(size = 10), 
+        axis.ticks.length.x = unit(0.25, "cm"), 
+        legend.position = "top", 
+        legend.title = element_blank(), 
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(-5,-10,-10,-10),
+        legend.text = element_text(size = 8),
+        panel.background = element_rect(fill = "white", colour = "white"), 
+        panel.grid.major = element_line(size = 0.5, linetype = "solid", colour = ("#e6e6e6")), 
+        axis.title.y = element_text(margin = margin(r = 10)), 
+        axis.title.x = element_text(margin = margin(t = 10)),
+        legend.key.size = unit(c(0.5, 0.5), "line"),
+        plot.tag = element_text(size = 8),
+        plot.tag.position = c(0.05, 0.995)) + 
+  geom_ribbon(aes(x = time, ymin = lower, ymax = upper, fill = Sex), alpha = 0.3, colour = NA) +
+  xlab("") + 
+  ylab("") +
+  labs(tag = "(a)", subtitle = "Autumn") +
+  ylim(0.5, 1) + 
+  scale_fill_manual(values = mycolours)
+fall.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.dayf = append(cens.dayf, rep(0, 14))
+y.prob = 0
+which.cens = c()
+for(i in 1:25){
+  which.cens = append(which.cens, which(cens.dayf[i] == fallmod.df$time[1:25]))
+  y.prob = append(y.prob, fallmod.df$surv[which.cens[i]])
+}
+y.prob = y.prob[2:26]
+
+counter = 0
+for(i in cens.dayf){
+  if(i > 0){
+    counter = counter + 1
+    fall.plot = fall.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.03, linetype = 1, colour = "darkorange3", size = 0.3)
+    fall.plot = fall.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.03, linetype = 1, colour = "darkorange3", size = 0.3)
+  }
+}
+
+cens.daym = append(cens.daym, rep(0, 19))
+y.prob = 0
+which.cens = c()
+for(i in 1:30){
+  which.cens = append(which.cens, which(cens.daym[i] == fallmod.df$time[26:56]))
+  y.prob = append(y.prob, fallmod.df$surv[26:56][which.cens[i]])
+}
+y.prob = y.prob[2:31]
+
+counter = 0
+for(i in cens.daym){
+  if(i > 0){
+    counter = counter + 1
+    fall.plot = fall.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.03, linetype = 1, colour = "steelblue4", size = 0.3)
+    fall.plot = fall.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.03, linetype = 1, colour = "steelblue4", size = 0.3)
+  }
+}
+fall.plot
+
+# ggsave("fallplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 300, limitsize = TRUE)
+
+# FIGURES: Spring survival vs capture age
+#---------------------------------------------------------#
+ggsurvplot(springmod4, conf.int = TRUE, xlab = "Day of the year (From April 1st)", palette = c("orange", "steelblue"), legend.title = "Capture Age", legend.labs = c("Adult", "Juvenile"), linetype = "strata", censor.shape = "|", censor.size = 4)
+
+
+springmoda.df = data.frame(time = springmod4$time[1:11])
+springmodj.df = data.frame(time = springmod4$time[12:21])
+
+springmoda.df = springmoda.df %>% mutate(surv = springmod4$surv[1:11], lower = springmod4$lower[1:11], upper = springmod4$upper[1:11], CaptureAge = "Adult")
+springmodj.df = springmodj.df %>% mutate(surv = springmod4$surv[12:21], lower = springmod4$lower[12:21], upper = springmod4$upper[12:21], CaptureAge = "Juvenile")
+
+springmod.df = rbind(springmoda.df, springmodj.df)
+
+cens.day = spring.ptarmigan %>% filter(event == 0)
+cens.daya = cens.day %>% filter(CaptureAge == "ad")
+cens.daya = cens.daya$exit_day
+cens.daya = sort(unique(cens.daya))
+cens.dayj = cens.day %>% filter(CaptureAge == "juv")
+cens.dayj = cens.dayj$exit_day
+cens.dayj = sort(unique(cens.dayj))
+
+mycolours = c("darkorange", "steelblue")
+
+spring.plot = ggplot(data = springmod.df, aes(x = time, y = surv, color = CaptureAge, linetype = CaptureAge)) + 
+  geom_step(data = springmod.df %>% filter(CaptureAge == "Adult"), size = 0.5) + 
+  geom_step(data = springmod.df %>% filter(CaptureAge == "Juvenile"), size = 0.5) +
+  scale_x_continuous(breaks = seq(from = 1, to = 91.25001, by = 30.41667), 
+        labels = paste0(c("April", "May", "")), 
+         minor_breaks = seq(from = 1, to = 91.250001, by = 30.41667)) + 
+  theme(axis.text.x = element_text(hjust = -2.3), 
+        text = element_text(size = 10), 
+        axis.ticks.length.x = unit(0.25, "cm"), 
+        legend.position = "top", 
+        legend.title = element_blank(),
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(-5,-10,-10,-10),
+        legend.text = element_text(size = 8),
+        panel.background = element_rect(fill = "white", colour = "white"), 
+        panel.grid.major = element_line(size = 0.5, linetype = "solid", colour = ("#e6e6e6")), 
+        axis.title.y = element_text(margin = margin(r = 10), size = 10), 
+        axis.title.x = element_text(margin = margin(t = 10)),
+        legend.key.size = unit(c(0.5, 0.5), "line"),
+        plot.tag.position = c(0.05, 0.995),
+        plot.tag = element_text(size = 8)) + 
+  geom_ribbon(aes(x = time, ymin = lower, ymax = upper, fill = CaptureAge), alpha = 0.3, colour = NA) +
+  xlab("") + 
+  ylab("Seasonal survival (95% CI)") +
+  labs(tag = "(b)", subtitle = "Spring") +
+  ylim(0.5, 1) + 
+  scale_fill_manual(values = mycolours)
+spring.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.daya = append(cens.daya, rep(0, 8))
+y.prob = 0
+which.cens = c()
+for(i in 1:21){
+  which.cens = append(which.cens, which(cens.daya[i] == springmod.df$time[1:11]))
+  y.prob = append(y.prob, springmod.df$surv[1:11][which.cens[i]])
+}
+y.prob = y.prob[2:22]
+
+counter = 0
+for(i in cens.daya){
+  if(i > 0){
+    counter = counter + 1
+    spring.plot = spring.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.02, linetype = 1, colour = "darkorange3")
+    spring.plot = spring.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.02, linetype = 1, colour = "darkorange3")
+  }
+}
+spring.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.dayj = append(cens.dayj, rep(0, 6))
+y.prob = 0
+which.cens = c()
+for(i in 1:30){
+  which.cens = append(which.cens, which(cens.dayj[i] == springmod.df$time[12:21]))
+  y.prob = append(y.prob, springmod.df$surv[12:21][which.cens[i]])
+}
+y.prob = y.prob[2:31]
+
+counter = 0
+for(i in cens.dayj){
+  if(i > 0){
+    counter = counter + 1
+    spring.plot = spring.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.02, linetype = 1, colour = "steelblue4")
+    spring.plot = spring.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.02, linetype = 1, colour = "steelblue4")
+  }
+}
+spring.plot
+
+# ggsave("springplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+# FIGURES: Summer survival vs sex
+#---------------------------------------------------------#
+ggsurvplot(summermod2, conf.int = TRUE, xlab = "Day of the year (From June 1st)", palette = c("orange", "steelblue"), legend.title = "Sex", legend.labs = c("Female", "Male"), censor.shape = "|", censor.size = 4, xlim = c(1, 92), linetype = "strata")
+
+summermodf.df = data.frame(time = summermod2$time[1:23])
+summermodm.df = data.frame(time = summermod2$time[24:34])
+
+summermodf.df = summermodf.df %>% mutate(surv = summermod2$surv[1:23], lower = summermod2$lower[1:23], upper = summermod2$upper[1:23], Sex = "Female")
+summermodm.df = summermodm.df %>% mutate(surv = summermod2$surv[24:34], lower = summermod2$lower[24:34], upper = summermod2$upper[24:34], Sex = "Male")
+
+summermod.df = rbind(summermodf.df, summermodm.df)
+
+cens.day = summer.ptarmigan %>% filter(event == 0)
+cens.dayf = cens.day %>% filter(sex == "F")
+cens.dayf = cens.dayf$exit_day
+cens.dayf = sort(unique(cens.dayf))
+cens.daym = cens.day %>% filter(sex == "M")
+cens.daym = cens.daym$exit_day
+cens.daym = sort(unique(cens.daym))
+
+mycolours = c("darkorange", "steelblue")
+
+summer.plot = ggplot(data = summermod.df, aes(x = time, y = surv, color = Sex, linetype = Sex)) + 
+  geom_step(data = summermod.df %>% filter(Sex == "Female"), size = 0.5) + 
+  geom_step(data = summermod.df %>% filter(Sex == "Male"), size = 0.5) +
+  scale_x_continuous(breaks = seq(from = 1, to = 121.6667, by = 30.41667), 
+        labels = paste0(c("June", "July", "Aug", "   ")), 
+        minor_breaks = seq(from = 1, to = 121.6667, by = 30.41667)) + 
+  theme(axis.text.x = element_text(hjust = -1.5), 
+        text = element_text(size = 10), 
+        axis.ticks.length.x = unit(0.25, "cm"), 
+        legend.position = "top", 
+        legend.title = element_blank(),
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(-5,-10,-10,-10),
+        legend.text = element_text(size = 8),
+        panel.background = element_rect(fill = "white", colour = "white"), 
+        panel.grid.major = element_line(size = 0.5, linetype = "solid", colour = ("#e6e6e6")), 
+        axis.title.y = element_text(margin = margin(r = 10)), 
+        axis.title.x = element_text(margin = margin(t = 10)),
+        legend.key.size = unit(c(0.5, 0.5), "lines"),
+        plot.tag = element_text(size = 8),
+        plot.tag.position = c(0.05, 0.995)) + 
+  geom_ribbon(aes(x = time, ymin = lower, ymax = upper, fill = Sex), alpha = 0.3, colour = NA) +
+  xlab("Month") + 
+  ylab("") +
+  labs(tag = "(c)", subtitle = "Summer") +
+  ylim(0.5, 1) + 
+  scale_fill_manual(values = mycolours)
+summer.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.dayf = append(cens.dayf, rep(0, 18))
+y.prob = 0
+which.cens = c()
+for(i in 1:23){
+  which.cens = append(which.cens, which(cens.dayf[i] == summermod.df$time[1:23]))
+  y.prob = append(y.prob, summermod.df$surv[1:23][which.cens[i]])
+}
+y.prob = y.prob[2:24]
+
+counter = 0
+for(i in cens.dayf){
+  if(i > 0){
+    counter = counter + 1
+    summer.plot = summer.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.02, linetype = 1, colour = "darkorange3")
+    summer.plot = summer.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.02, linetype = 1, colour = "darkorange3")
+  }
+}
+summer.plot
+
+# Creating a ggsurvplot with vertical censor lines manually
+#---------------------------------------------------------#
+cens.daym = append(cens.daym, rep(0, 6))
+y.prob = 0
+which.cens = c()
+for(i in 1:10){
+  which.cens = append(which.cens, which(cens.daym[i] == summermod.df$time[24:34]))
+  y.prob = append(y.prob, summermod.df$surv[24:34][which.cens[i]])
+}
+y.prob = y.prob[2:11]
+
+counter = 0
+for(i in cens.daym){
+  if(i > 0){
+    counter = counter + 1
+    summer.plot = summer.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]+0.02, linetype = 1, colour = "steelblue4")
+    summer.plot = summer.plot + geom_segment(x = i, y = y.prob[counter], xend = i, yend = y.prob[counter]-0.02, linetype = 1, colour = "steelblue4")
+  }
+}
+summer.plot
+
+# ggsave("summerplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+seasonalPlot = ggarrange(fall.plot, spring.plot, summer.plot, ncol = 1, nrow = 3)
+seasonalPlot
+
+# ggsave("seasonalPlot.tiff", plot = last_plot(), device = "tiff", path = "R:/Prosjekter/12179000 - Lirypetelemetri i Lierne/WP_Survival_Lierne/doc/Figurer", scale = 1, width = 8, height = 18, units = "cm", dpi = 600, limitsize = TRUE)
+
+
+# Sex-specific survial
+#---------------------------------------------------------#
+PlotDat1 <- data.frame(Mean=(c(summary(Fullmod2,365)$surv[1], 
+                               summary(Fullmod2,365)$surv[2])),
+                       Sex=c("Female", "Male"),
+                       LowCI=(c(summary(Fullmod2,365)$lower[1], 
+                                summary(Fullmod2,365)$lower[2])), 
+                       HighCI=(c(summary(Fullmod2,365)$upper[1], 
+                                 summary(Fullmod2,365)$upper[2])))
+
+
+p <- ggplot(PlotDat1, aes(x=Sex, y=Mean)) + 
+  ylim(0,1) +
+  xlab("Sex") +
+  ylab("Annual survival (95% CI)") +
+  labs(tag = "(b)") +
+  geom_point(size=2, color="steelblue")+ # changed colour from #E69F00
+  geom_errorbar(aes(ymin=LowCI, ymax=HighCI), width=0.07, lwd=0.5, color="steelblue") + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+
+p = p + theme_minimal()+
+  theme(legend.position = "none",
+        title = element_text(size = 8),
+        axis.text.x = element_text(size = 10), 
+        axis.title.x = element_text(size = 10, margin = margin(t=5)), 
+        axis.title.y = element_text(margin = margin(t=0, r=10, b=0, l=0), size = 10), 
+        axis.text.y = element_text(size = 10),
+        plot.tag.position = c(0.1, 1.08), plot.margin = unit(c(0.8, 0, 0, 0), "cm"))
+p
+# ggsave("sexSpecSurvplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+# Year-specific survial
+#---------------------------------------------------------#
+PlotDat2 <- data.frame(Mean=(summary(Fullmod3,365)$surv),
+                       Year=c("2015/16", "2016/17", "2017/18", "2018/19"),
+                       LowCI=(summary(Fullmod3,365)$lower), 
+                       HighCI=(summary(Fullmod3,365)$upper))
+
+
+p2 <- ggplot(PlotDat2, aes(x=Year, y=Mean)) + 
+  ylim(0,1) +
+  xlab("Year") +
+  ylab("")+
+  labs(tag = "(c)") +
+  geom_point(size=2, color="steelblue")+ # changed colour from #E69F00
+  geom_errorbar(aes(ymin=LowCI, ymax=HighCI), width=0.14, lwd=0.5, color="steelblue") + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+
+p2 = p2 + theme_minimal()+
+  theme(legend.position = "none",
+        title = element_text(size = 8),
+        axis.text.x = element_text(size = 10), 
+        axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 10), 
+        axis.title.x = element_text(size = 10, margin = margin(t=5)), 
+        axis.text.y = element_text(size = 10),
+        plot.tag.position = c(0.1, 1.08), plot.margin = unit(c(0.8, 0, 0, 0), "cm")) 
+p2
+# ggsave("yearSpecSurvplot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+# Comparison with Sandercock et al 2011 and Smith & Willebrand 1999
+#---------------------------------------------------------#
+addline_format <- function(x,...){
+    gsub('\\s','\n',x)
+}
+
+PlotDat3 <- data.frame(Studie=c("Swe harvest","Mer-Sel 30%", 
+                                "Lierne 2015-2019", "Mer-Sel 15%", 
+                                "Swe non-harvest", "Mer-Sel 0%" 
+                                ),
+                       Mean=c(0.28, 0.30, 0.43, 0.47, 0.53, 0.54), 
+                       LowCI=c(0.18, 0.20, 0.36, 0.35, 0.40, 0.38),
+                       HighCI=c(0.38, 0.40, 0.50, 0.59, 0.67, 0.70))
+PlotDat3$Studie = factor(PlotDat3$Studie, levels = PlotDat3$Studie[order(PlotDat3$Mean)])
+
+p3 <- ggplot(PlotDat3, aes(x=Studie, y=Mean)) + 
+  ylim(0,1) +
+  xlab("") +
+  ylab("Annual survival (95% CI)")+
+  geom_point(size=2, color=c("steelblue", "steelblue", "orange", "steelblue", "steelblue", "steelblue"))+ # Changed colour from #E69F00
+  geom_errorbar(aes(ymin=LowCI, ymax=HighCI), width=0.21, lwd=0.5, color=c("steelblue", "steelblue", "orange", "steelblue", "steelblue", "steelblue")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+
+p3 = p3 + theme_minimal()+
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 8, hjust = 0.5), 
+        axis.title.y = element_text(margin = margin(t = 0, r = 5, b = 0, l = 0), size = 10), 
+        axis.text.y = element_text(size = 10)) + scale_x_discrete(breaks=unique(PlotDat3$Studie), 
+        labels = c("C.Swe\n1992-95 \nharv", "C.Nor\nMer-Sel\n1996-99\n30% harv", "C.Nor\nLierne\n2015-19\nharv", "C.Nor\nMer-Sel\n1996-99\n15% harv", "C.Swe\n1992-95\nnon-harv", "C.Nor\nMer-Sel\n1996-99\nnon-harv"))
+p3
+
+# ggsave("survCompPlot2.tiff", plot = last_plot(), device = "tiff", path = "R:/Prosjekter/12179000 - Lirypetelemetri i Lierne/WP_Survival_Lierne/doc/Figurer", scale = 1, width = 10, height = 8, units = "cm", dpi = 600, limitsize = TRUE)
+
+annualPlot = ggarrange(full.plot, p, p2, ncol = 1, nrow = 3)
+annualPlot
+# ggsave("annualPlot.tiff", plot = last_plot(), device = "tiff", path = "R:/Prosjekter/12179000 - Lirypetelemetri i Lierne/WP_Survival_Lierne/doc/Figurer", scale = 1, width = 8, height = 20.4, units = "cm", dpi = 600, limitsize = FALSE)
+
+# Cause-specific for the full year
+#---------------------------------------------------------#
+PlotDat4 <- data.frame(Cause=c("Harvest mortality", "Natural mortality"),
+                        Mean=c(0.25, 0.33), 
+                        LowCI=c(0.19, 0.27),
+                        HighCI=c(0.31, 0.38))
+
+
+p4 <- ggplot(PlotDat4, aes(x=Cause, y=Mean)) + 
+  ylim(0,0.4) +
+  xlab("") +
+  ylab("Annual mortality probability")+
+  geom_point(size=2, color="steelblue")+
+  geom_errorbar(aes(ymin=LowCI, ymax=HighCI), width=0.07, lwd=0.5, color="steelblue") +
+  labs(tag = "(a)", subtitle = "Year")
+
+p4 = p4 + theme_minimal()+
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 10), 
+        axis.title.y = element_text(margin = margin(r = 10), size = 10),
+        plot.tag = element_text(size = 8),
+        plot.tag.position = c(0.05, 1))
+p4
+
+# ggsave("causeSpecPlot.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 8, height = 6, units = "cm", dpi = 600, limitsize = TRUE)
+
+# Cause-specific for the autumn only
+#---------------------------------------------------------#
+PlotDat6 <- data.frame(Cause=c("Harvest mortality", "Natural mortality"),
+                        Mean=c(0.24, 0.09), 
+                        LowCI=c(0.18, 0.14),
+                        HighCI=c(0.30, 0.04))
+
+p6 <- ggplot(PlotDat6, aes(x=Cause, y=Mean)) + 
+  ylim(0,0.4) +
+  xlab("") +
+  ylab("Autumn mortality probability")+
+  geom_point(size=2, color="steelblue")+
+  geom_errorbar(aes(ymin=LowCI, ymax=HighCI), width=0.07, lwd=0.5, color="steelblue") +
+  labs(tag = "(b)", subtitle = "Autumn")
+
+p6 = p6 + theme_minimal()+
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 10), 
+        axis.title.y = element_text(margin = margin(r = 10), size = 10),
+        plot.tag = element_text(size = 8),
+        plot.tag.position = c(0.05, 1))
+p6
+
+# Instantaneous hazards
+#---------------------------------------------------------#
+PlotDat5 <- data.frame(Time=rep(seq(1, 365),3),
+                       Risk=c(hh3, hh2, hh1), 
+                       Factor=rep(c("1. Total", "2. Harvest", "3. Natural"), each=365))
+
+p5 = ggplot(PlotDat5, aes(x=Time, y=Risk, group=Factor, col=Factor, linetype = Factor)) + 
+  xlab("Month") +
+  ylab("Mortality risk")+ geom_line(aes(linetype = Factor), lwd = 0.5) +
+  labs(tag = "(c)")
+
+p5 = p5 + theme_minimal()+
+  theme(axis.text.x = element_text(size = 10, hjust = 0.1, angle = 90),
+        axis.ticks.length.x = unit(0.25, "cm"),
+        axis.ticks.x = element_line(color = "dark grey"),
+        legend.title = element_blank(),
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(-5,-10,-10,-10),
+        legend.text = element_text(size = 8),
+        axis.title.y = element_text(margin = margin(r=10), size = 10), 
+        axis.title.x = element_text(margin = margin(t=10), size = 10), 
+        legend.position = "top",
+        plot.tag = element_text(size = 8),
+        plot.tag.position = c(0.05, 0.999),
+        legend.key.size = unit(c(0.5, 0.5, 0.5), "lines")) + 
+  scale_color_manual(labels = c("Total", "Harvest", "Natural"), values=c("steelblue", "#E69F00", "maroon")) + 
+  scale_linetype_discrete(labels = c("Total", "Harvest", "Natural")) + 
+  scale_x_continuous(breaks = seq(from = 1, to = 395.4167, by = 30.41667), 
+                     labels = paste0(c("Aug", "Sept", "Oct", "Nov", "Des", "Jan", "Feb", "Mar", "Apr", "May", "June", "July", "")), 
+                     minor_breaks = seq(from = 1, to = 395.4167, by = 30.41667)) +
+  ylim(0, 0.008)
+p5
+
+# ggsave("smoothHazard.png", plot = last_plot(), device = "png", path = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots", scale = 1, width = 16, height = 12, units = "cm", dpi = 600, limitsize = TRUE)
+
+mortRiskHazard = ggarrange(p4, p6, p5, ncol = 1, nrow = 3)
+mortRiskHazard
+
+# ggsave("mortRiskHazard.tiff", plot = last_plot(), device = "tiff", path = "R:/Prosjekter/12179000 - Lirypetelemetri i Lierne/WP_Survival_Lierne/doc/Figurer", scale = 1, width = 8, height = 18, units = "cm", dpi = 600, limitsize = TRUE)
+
+
+```
+*
+*
+Map of Lifjellet, Guslia and all the marked birds
+```{r}
+##---------------------------------------------------------##
+## Creating the map of the study area showing all the      ##
+## marked willow ptarmigan                                 ##
+##---------------------------------------------------------##
+
+# Creating column with date for mark occation
+#---------------------------------------------------------#
+map$markdate <- ifelse(map$Status == 1, paste(map$date), NA)
+for (i in 2:nrow(map)) {if (map$RingNR[i] == map$RingNR[i-1]) {map$markdate[i] <- map$markdate[i-1]}} # copying values
+
+# Adding long/lat for use with leaflet
+#---------------------------------------------------------#
+utm_map = SpatialPoints(cbind(map$UTM_X, map$UTM_Y), proj4string = CRS("+proj=utm +zone=33")) # creating UTM coordinate matrix
+longlatcoord_map = spTransform(utm_map, CRS("+proj=longlat +ellps=WGS84 +datum=WGS84")) # transforming to longitude/latitude
+map_temp1 = as.data.frame(longlatcoord_map)
+map = map %>% mutate(decimalLongitude = map_temp1$coords.x1, decimalLatitude = map_temp1$coords.x2)
+
+# creating vector of potential (not confirmed) duration of activity for transmitters (in weeks)
+#---------------------------------------------------------#
+map_temp2 <- map
+map_temp2$maxdate <- ifelse(map$Status == 3 | map$Status == 4 | map$Status == 5, paste(map$date), as.character(today())) # if recovered dead, last date is recovery date, if not last date is today
+map_temp2$maxdate <- parse_date_time(map_temp2$maxdate, "ymd") # unifying class for date
+map_temp2$duration <- difftime(map_temp2$maxdate, map_temp2$markdate, units = "weeks")
+map_temp2 <- map_temp2 %>% group_by(RingNR) %>% filter(date==max(date))
+# weeks of activity for transmitters:
+duration1 <- map_temp2 %>% group_by(CollarNR) %>% summarise(duration = sum(duration))
+# removing collars > 30 months (130 weeks) of activity unless heard latest 4 months, as battery duration is approx 30 months:
+map_temp3 <- map_temp2 %>% group_by(CollarNR) %>% filter(date==max(date))
+map_temp3 <- map_temp3[,c("CollarNR", "date")]
+duration2 <- full_join(duration1, map_temp3, by = "CollarNR")
+duration3 <- duration2 %>% filter(duration2$date >= today() - days(120) | duration <= 130)
+
+# creating dataframe with latest registered coordinates of ACTIVE radio tags
+#---------------------------------------------------------#
+map_active_temp1 <- semi_join(map, duration3, by = "CollarNR") # excluding old collars
+map_active_temp2 <- map_active_temp1 %>% group_by(RingNR) %>% filter(date==max(date)) # latest telemetry recapture
+map_active <- map_active_temp2 %>% filter(Status == 1 | Status == 2 | Status == 6) # including live signals and mortality signals when transmitter is not recovered
+
+# preparations for mapping
+#---------------------------------------------------------#
+popupUTM <- paste(map_active$UTM_X, map_active$UTM_Y, sep=" ") # creating coordinate string for popups
+freq <- as.factor(substr(map_active$CollarFrequency,4,6)) # separating 3 last digits in frequencies
+map_active <- map_active %>% mutate(mapcolor=ifelse(Status==6, "dead", ifelse(sex == "F", "female", "male")))
+
+# Map of captured birds
+#---------------------------------------------------------#
+  map_cap <- map %>% filter(Status==1)
+  
+  map_capture <- leaflet(map_cap) %>%
+    #addProviderTiles(providers$Esri.WorldTopoMap) %>% addProviderTiles(providers$Esri.WorldImagery, options = providerTileOptions(opacity = 0.3)) %>%
+    addWMSTiles("http://openwms.statkart.no/skwms1/wms.topo4?", layers = "topo4_WMS", options = WMSTileOptions(format = "image/png", transparent = F, opacity = 1), attribution = "Kartverket") %>%
+    #setView(lng = 13.22, lat = 64.465, zoom = 13) %>% # Study site Lifjellet
+    #setView(lng = 13.48, lat = 64.28, zoom = 13) %>% # Study site Guslia
+    #addMarkers(icon = bird, lng = d_active$decimalLongitude, lat = d_active$decimalLatitude) %>%
+    addCircleMarkers(lng = map_cap$decimalLongitude, lat = map_cap$decimalLatitude,
+                     stroke = T, weight = 2, radius = 2.5,
+                     color = "darkorange", opacity = 1, 
+                     fillColor = "royalblue4", fillOpacity = 1) %>%
+    #addLegend("bottomleft", opacity = 1,
+    #    title = "Latest position of active transmitters",
+    #    colors = c("orange", "brown", "green", "lightblue", "red"),
+    #    labels = c("Positions in 2018 - females", "Positions in 2018 - males", "Positions in 2016-2017 - females", "Positions in 2016-2017 - males", "Mortality signals")) %>%
+    
+    addScaleBar(position = "topright", options = scaleBarOptions(maxWidth = 100, imperial = F)) #%>%
+    #addMeasure(primaryLengthUnit = "meters", primaryAreaUnit = "hectares")
+  
+  map_capture 
+
+# Create triangle icons used to represent captured birds
+#---------------------------------------------------------#
+ triangleIcon <- makeIcon(
+  iconUrl = "C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots/triangle-transparent.png",
+  iconWidth = 30, iconHeight = 30,
+  iconAnchorX = 15, iconAnchorY = 15,
+)
+
+# Colour palette for circles
+#---------------------------------------------------------#
+pal = c("#8fbaff", "#146eff")
+
+# Map of all birds (captured birds as triangles) part 1
+#---------------------------------------------------------#
+map_all1 = leaflet(map) %>% addWMSTiles("http://openwms.statkart.no/skwms1/wms.topo4?", layers = "topo4_WMS", options = WMSTileOptions(format = "image/png", transparent = F, opacity = 1), attribution = "Kartverket") %>%  setView(lat = 64.2, lng = 13.4, zoom = 10)  %>% addCircleMarkers(lng = map$decimalLongitude, lat = map$decimalLatitude,
+                     stroke = T, weight = 2, radius = 10,
+                     color = pal[1], opacity = 1, 
+                     fillColor = pal[2], fillOpacity = 1) %>% 
+                     addMarkers(lng = map_cap$decimalLongitude, lat = map_cap$decimalLatitude, icon = triangleIcon) %>% addScaleBar(position = "bottomright", options = scaleBarOptions(maxWidth = 100, imperial = F)) 
+map_all1
+
+# mapshot(map_all1, file = paste0(getwd(), "/mapAll1.png"), remove_controls = c("zoomControl"), vwidth = 1200, vheight = 800)
+
+# Map of all birds (captured birds as triangles) part 2
+#---------------------------------------------------------#
+map_all2 = leaflet(map) %>% addWMSTiles("http://openwms.statkart.no/skwms1/wms.topo4?", layers = "topo4_WMS", options = WMSTileOptions(format = "image/png", transparent = F, opacity = 1), attribution = "Kartverket") %>%  setView(lat = 64.35, lng = 13.4, zoom = 10)  %>% addCircleMarkers(lng = map$decimalLongitude, lat = map$decimalLatitude,
+                     stroke = T, weight = 2, radius = 10,
+                     color = pal[1], opacity = 1, 
+                     fillColor = pal[2], fillOpacity = 1) %>% 
+                     addMarkers(lng = map_cap$decimalLongitude, lat = map_cap$decimalLatitude, icon = triangleIcon) %>% addScaleBar(position = "topright", options = scaleBarOptions(maxWidth = 100, imperial = F)) 
+map_all2
+
+# mapshot(map_all2, file = paste0(getwd(), "/mapAll2.png"), remove_controls = c("zoomControl"), vwidth = 1200, vheight = 800)
+
+# Map of all birds (captured birds as triangles) part 3
+#---------------------------------------------------------#
+map_all3 = leaflet(map) %>% addWMSTiles("http://openwms.statkart.no/skwms1/wms.topo4?", layers = "topo4_WMS", options = WMSTileOptions(format = "image/png", transparent = F, opacity = 1), attribution = "Kartverket") %>%  setView(lat = 64.5, lng = 13.4, zoom = 10)  %>% addCircleMarkers(lng = map$decimalLongitude, lat = map$decimalLatitude,
+                     stroke = T, weight = 2, radius = 10,
+                     color = pal[1], opacity = 1, 
+                     fillColor = pal[2], fillOpacity = 1) %>% 
+                     addMarkers(lng = map_cap$decimalLongitude, lat = map_cap$decimalLatitude, icon = triangleIcon) %>% addScaleBar(position = "topright", options = scaleBarOptions(maxWidth = 100, imperial = F)) 
+map_all3
+
+# mapshot(map_all3, file = paste0(getwd(), "/mapAll3.png"), remove_controls = c("zoomControl"), vwidth = 1200, vheight = 800)
+
+# Create map of Norway
+#---------------------------------------------------------#
+norway = leaflet(map_cap) %>%
+    addWMSTiles("http://openwms.statkart.no/skwms1/wms.topo4?", layers = "topo4_WMS", options = WMSTileOptions(format = "image/png", transparent = F, opacity = 1), attribution = "Kartverket") %>% setView(lng = 15, lat = 64.26527, zoom = 5) %>% addScaleBar(position = "bottomright", options = scaleBarOptions(maxWidth = 100, imperial = F))
+norway
+
+# Print map of Norway
+# setwd("C:/Users/markus.israelsen/OneDrive - NINA/Lirypeprosjektet/Lirype Survival Artikkel/R/Plots")
+
+# mapshot(norway, file = paste0(getwd(), "/Norway.png"), remove_controls = c("zoomControl"), vwidth = 1000, vheight = 900)
+
+
+```
+*
+*
+Study area coordinates
+```{r}
+##---------------------------------------------------------##
+## Finding the edge points for the study area coordinates  ##
+##---------------------------------------------------------##
+
+# Remove willow ptarmigan from the pilot
+#--------------------------------------------------------#
+captureCoord = occ %>% filter(Status == 1)
+fisk = capture %>% filter(Area == "Fiskløysdalen")
+fisk = fisk$RingNR
+counter = 0
+removeBirds = c()
+for(i in fisk){
+  counter = counter + 1
+  removeBirds = append(removeBirds, which(captureCoord$RingNR == fisk[counter]))
+}
+removeBirds
+
+captureCoord = captureCoord[-removeBirds, ]
+captureCoord = captureCoord[-47, ] # A captured bird that did not get a radio tag the first time, but did the year after.
+captureCoord = captureCoord[-134, ] # A captured bird that did not get a radio tag the first time, but did the year after.
+
+# Used the map to find the degrees North that separates the Lifjellet and Guslia locations
+#--------------------------------------------------------#
+lifjelletCoord = captureCoord %>% filter(UTM_Y > 7133642)
+gusliaCoord = captureCoord %>% filter(UTM_Y < 7133642)
+
+# Finding the max and min UTM coordinates for Lifjellet and Guslia respectively
+#--------------------------------------------------------#
+min(lifjelletCoord$UTM_X) # 412526
+max(lifjelletCoord$UTM_X) # 422546
+min(lifjelletCoord$UTM_Y) # 7145593
+max(lifjelletCoord$UTM_Y) # 7152339
+
+min(gusliaCoord$UTM_X) # 423816
+max(gusliaCoord$UTM_X) # 432289
+min(gusliaCoord$UTM_Y) # 7126064
+max(gusliaCoord$UTM_Y) # 7131079
+
+```
+*
+*
